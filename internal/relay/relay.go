@@ -24,6 +24,7 @@ func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
 	relay := khatru.NewRelay()
 	relay.Addr = cfg.Addr
 	relay.ServiceURL = cfg.RelayURL
+	relay.Negentropy = true
 
 	relay.Info.Name = cfg.Name
 	relay.Info.Description = cfg.Description
@@ -33,7 +34,7 @@ func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
 		MaxLimit:     cfg.MaxLimit,
 		DefaultLimit: cfg.MaxLimit,
 	}
-	relay.Info.AddSupportedNIPs([]int{37, 51})
+	relay.Info.AddSupportedNIPs([]int{37, 51, 77})
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
