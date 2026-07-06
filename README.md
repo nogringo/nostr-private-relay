@@ -10,6 +10,8 @@ A private relay where only the author can read their own events.
 | `RELAY_URL` | empty | Public relay URL used for NIP-42 challenge validation, for example `wss://relay.example.com/`. |
 | `RELAY_NAME` | `Private relay` | NIP-11 relay name. |
 | `RELAY_DESCRIPTION` | `A private relay where only the author can read their own events.` | NIP-11 relay description. |
+| `RELAY_ICON` | empty | Optional NIP-11 icon URL. |
+| `RELAY_CONTACT` | empty | Optional contact info for the relay operator. |
 | `RELAY_PUBKEY` | empty | Optional relay operator pubkey in hex. |
 | `RELAY_LMDB_PATH` | `./data/lmdb` | LMDB directory. |
 | `RELAY_MAX_LIMIT` | `500` | Maximum query limit. |

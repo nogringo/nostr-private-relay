@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"embed"
+	"strings"
 
 	"fiatjaf.com/nostr"
 	"fiatjaf.com/nostr/eventstore"
@@ -28,6 +30,10 @@ func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
 
 	relay.Info.Name = cfg.Name
 	relay.Info.Description = cfg.Description
+	relay.Info.Software = "nostr-private-relay"
+	relay.Info.Version = version()
+	relay.Info.Icon = cfg.Icon
+	relay.Info.Contact = cfg.Contact
 	relay.Info.PubKey = cfg.PubKey
 	relay.Info.Limitation = &nip11.RelayLimitationDocument{
 		AuthRequired: true,
@@ -75,4 +81,19 @@ func requestAuthIfConnected(ctx context.Context) {
 	if khatru.GetConnection(ctx) != nil {
 		khatru.RequestAuth(ctx)
 	}
+}
+
+//go:embed version.txt
+var versionFile embed.FS
+
+func version() string {
+	data, err := versionFile.ReadFile("version.txt")
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(data))
+	if version == "" {
+		return ""
+	}
+	return version
 }

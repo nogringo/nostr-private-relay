@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -123,6 +124,38 @@ func TestPreventBroadcastBlocksOtherAuthors(t *testing.T) {
 	}
 }
 
+func TestNewWithStorePublishesRelayMetadata(t *testing.T) {
+	relay := NewWithStore(Config{
+		Addr:        ":0",
+		Name:        "test relay",
+		Description: "test",
+		Icon:        "https://example.com/icon.png",
+		Contact:     "nostr@example.com",
+		LMDBPath:    "unused",
+		MaxLimit:    500,
+	}, newMemoryStore())
+
+	if relay.Info.Software != "nostr-private-relay" {
+		t.Fatalf("expected software metadata to be set, got %q", relay.Info.Software)
+	}
+	if relay.Info.Icon != "https://example.com/icon.png" {
+		t.Fatalf("expected icon metadata to be set, got %q", relay.Info.Icon)
+	}
+	if relay.Info.Contact != "nostr@example.com" {
+		t.Fatalf("expected contact metadata to be set, got %q", relay.Info.Contact)
+	}
+}
+
+func TestVersionIsLoadedFromVersionFile(t *testing.T) {
+	got := version()
+	if got == "" {
+		t.Fatal("expected version from version.txt, got empty string")
+	}
+	if got != strings.TrimSpace(string(mustReadVersionFile(t))) {
+		t.Fatalf("expected version to match version.txt contents, got %q", got)
+	}
+}
+
 func testConfig() Config {
 	return Config{
 		Addr:        ":0",
@@ -152,6 +185,15 @@ func assertAuthors(t *testing.T, got []nostr.PubKey, want ...nostr.PubKey) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("authors mismatch: got %v want %v", got, want)
 	}
+}
+
+func mustReadVersionFile(t *testing.T) []byte {
+	t.Helper()
+	data, err := versionFile.ReadFile("version.txt")
+	if err != nil {
+		t.Fatalf("failed to read embedded version file: %v", err)
+	}
+	return data
 }
 
 func collect(seq iter.Seq[nostr.Event]) []nostr.Event {

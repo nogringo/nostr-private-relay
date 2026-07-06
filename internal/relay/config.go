@@ -11,9 +11,11 @@ import (
 const (
 	defaultAddr        = ":3334"
 	defaultName        = "Private relay"
+	defaultDescription = "A private relay where only the author can read their own events."
+	defaultIcon        = ""
+	defaultContact     = ""
 	defaultLMDBPath    = "./data/lmdb"
 	defaultMaxLimit    = 500
-	defaultDescription = "A private relay where only the author can read their own events."
 )
 
 type Config struct {
@@ -21,6 +23,8 @@ type Config struct {
 	RelayURL    string
 	Name        string
 	Description string
+	Icon        string
+	Contact     string
 	PubKey      *nostr.PubKey
 	LMDBPath    string
 	MaxLimit    int
@@ -32,6 +36,8 @@ func LoadConfig() (Config, error) {
 		RelayURL:    os.Getenv("RELAY_URL"),
 		Name:        envOrDefault("RELAY_NAME", defaultName),
 		Description: envOrDefault("RELAY_DESCRIPTION", defaultDescription),
+		Icon:        envOrDefault("RELAY_ICON", defaultIcon),
+		Contact:     envOrDefault("RELAY_CONTACT", defaultContact),
 		LMDBPath:    envOrDefault("RELAY_LMDB_PATH", defaultLMDBPath),
 		MaxLimit:    defaultMaxLimit,
 	}
