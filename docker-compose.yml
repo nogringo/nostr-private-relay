@@ -1,11 +1,14 @@
 services:
-  relay:
+  private-relay:
     image: ghcr.io/nogringo/nostr-private-relay:main
     container_name: nostr-private-relay
     ports:
       - "${PORT:-3334}:3334"
     volumes:
-      - ./data:/app/data
+      - data:/app/data
     env_file:
       - .env
     restart: unless-stopped
+
+volumes:
+  data:
