@@ -1,15 +1,12 @@
 # syntax=docker/dockerfile:1
 
-# Build stage (runs on the native architecture of the runner)
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
-
-ARG TARGETOS
-ARG TARGETARCH
+# Build stage (runs under emulation for non-native platforms)
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
-# Install git and ca-certificates for building
-RUN apk add --no-cache git ca-certificates
+# Install git, ca-certificates, and build tools (gcc, musl-dev for CGo/LMDB)
+RUN apk add --no-cache git ca-certificates gcc musl-dev
 
 # Copy dependency files first (for layer caching)
 COPY go.mod go.sum ./
@@ -18,8 +15,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Native Go cross-compilation for the target architecture
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o relay ./cmd/relay
+# Build the binary with CGo enabled (required by LMDB)
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o relay ./cmd/relay
 
 # Final stage
 FROM alpine:latest
