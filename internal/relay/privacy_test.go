@@ -166,12 +166,17 @@ func testConfig() Config {
 	}
 }
 
-func signedEvent(t *testing.T, sk nostr.SecretKey, kind nostr.Kind, content string) nostr.Event {
+func signedEvent(t *testing.T, sk nostr.SecretKey, kind nostr.Kind, content string, tags ...nostr.Tag) nostr.Event {
+	t.Helper()
+	return signedEventAt(t, sk, kind, nostr.Now(), content, tags...)
+}
+
+func signedEventAt(t *testing.T, sk nostr.SecretKey, kind nostr.Kind, createdAt nostr.Timestamp, content string, tags ...nostr.Tag) nostr.Event {
 	t.Helper()
 	event := nostr.Event{
-		CreatedAt: nostr.Now(),
+		CreatedAt: createdAt,
 		Kind:      kind,
-		Tags:      nostr.Tags{},
+		Tags:      append(nostr.Tags{}, tags...),
 		Content:   content,
 	}
 	if err := event.Sign(sk); err != nil {

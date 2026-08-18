@@ -23,6 +23,11 @@ func New(cfg Config) (*khatru.Relay, func(), error) {
 }
 
 func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
+	relay, _ := newWithVanish(cfg, store)
+	return relay
+}
+
+func newWithVanish(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRegistry) {
 	relay := khatru.NewRelay()
 	relay.Addr = cfg.Addr
 	relay.ServiceURL = cfg.RelayURL
@@ -40,12 +45,31 @@ func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
 		MaxLimit:     cfg.MaxLimit,
 		DefaultLimit: cfg.MaxLimit,
 	}
-	relay.Info.AddSupportedNIPs([]int{37, 51, 77})
+	relay.Info.AddSupportedNIPs([]int{37, 51, 62, 77})
+
+	vanish := NewVanishRegistry(cfg, store)
+	vanish.log = relay.Log
+	// rebuild() marked nothing as purged, so this finishes a purge that a crash
+	// or a reboot interrupted. Synchronous on purpose: serving before it is done
+	// would make the deleted events readable again.
+	if err := vanish.PurgeAll(); err != nil {
+		relay.Log.Printf("failed to enforce stored requests to vanish: %v", err)
+	}
+	if vanish.HasUnresolvedRequests() {
+		relay.Log.Printf("WARNING: stored NIP-62 requests to vanish cannot be evaluated without RELAY_URL and are NOT being enforced")
+	}
 
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
 	}
-	relay.OnEvent = requireAuthForEvent
+	relay.OnEvent = func(ctx context.Context, event nostr.Event) (bool, string) {
+		if reject, msg := requireAuthForEvent(ctx, event); reject {
+			return reject, msg
+		}
+		return vanish.onEvent(event)
+	}
+	relay.OnEventSaved = vanish.onEventSaved
+	relay.AllowDeleting = vanish.allowDeleting
 	relay.OnRequest = requireAuthForFilter
 	relay.OnCount = requireAuthForFilter
 	relay.PreventBroadcast = func(ws *khatru.WebSocket, _ nostr.Filter, event nostr.Event) bool {
@@ -58,10 +82,15 @@ func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
 	relay.Count = private.count
 	relay.CountHLL = private.countHLL
 
-	return relay
+	return relay, vanish
 }
 
-func requireAuthForEvent(ctx context.Context, _ nostr.Event) (bool, string) {
+func requireAuthForEvent(ctx context.Context, event nostr.Event) (bool, string) {
+	// NIP-62: a request to vanish must be honoured regardless of the user's status
+	if event.Kind == KindRequestToVanish {
+		return false, ""
+	}
+
 	if _, ok := khatru.GetAuthed(ctx); !ok {
 		requestAuthIfConnected(ctx)
 		return true, authRequired

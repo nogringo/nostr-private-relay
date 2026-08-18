@@ -2,12 +2,14 @@
 
 A private relay where only the author can read their own events.
 
+Supported NIPs: 1, 9, 11, 37, 40, 42, 45, 51, 62, 70, 77, 86.
+
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RELAY_ADDR` | `:3334` | HTTP/WebSocket listen address. |
-| `RELAY_URL` | empty | Public relay URL used for NIP-42 challenge validation, for example `wss://relay.example.com/`. |
+| `RELAY_URL` | empty | Public relay URL, for example `wss://relay.example.com/`. Used for NIP-42 challenge validation and NIP-62 targeting. |
 | `RELAY_NAME` | `Private relay` | NIP-11 relay name. |
 | `RELAY_DESCRIPTION` | `A private relay where only the author can read their own events.` | NIP-11 relay description. |
 | `RELAY_ICON` | empty | Optional NIP-11 icon URL. |
