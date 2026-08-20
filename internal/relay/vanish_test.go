@@ -51,7 +51,7 @@ func TestVanishTargetsThisRelay(t *testing.T) {
 
 func TestVanishPurgesAuthorEventsUpToCreatedAt(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	older := signedEventAt(t, skA, nostr.KindTextNote, now-10, "A older")
@@ -76,7 +76,7 @@ func TestVanishPurgesAuthorEventsUpToCreatedAt(t *testing.T) {
 
 func TestVanishKeepsGiftWrapsAddressedToPubkey(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	wrap := signedEventAt(t, skB, nostr.KindGiftWrap, now-10, "wrap", nostr.Tag{"p", pkA.Hex()})
@@ -95,7 +95,7 @@ func TestVanishKeepsGiftWrapsAddressedToPubkey(t *testing.T) {
 
 func TestVanishIgnoresRequestForAnotherRelay(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	older := signedEventAt(t, skA, nostr.KindTextNote, now-10, "A older")
@@ -143,7 +143,7 @@ func TestVanishPurgeSpansMultipleBatches(t *testing.T) {
 
 func TestVanishBlocksRepublishing(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	older := signedEventAt(t, skA, nostr.KindTextNote, now-10, "A older")
@@ -179,7 +179,7 @@ func TestVanishBlocksRepublishing(t *testing.T) {
 
 func TestVanishBlocksReplayedAndOlderRequests(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	vanish := vanishEvent(t, skA, now, testRelayURL)
@@ -204,7 +204,7 @@ func TestVanishBlocksReplayedAndOlderRequests(t *testing.T) {
 func TestVanishRejectsUnusableTimestamps(t *testing.T) {
 	for _, createdAt := range []nostr.Timestamp{0, nostr.Now() + 3600} {
 		store := newMemoryStore()
-		relay, registry := newWithVanish(vanishConfig(), store)
+		relay, registry, _ := newWithRegistries(vanishConfig(), store)
 
 		vanish := vanishEvent(t, skA, createdAt, testRelayURL)
 		if _, err := relay.AddEvent(context.Background(), vanish); err == nil {
@@ -221,7 +221,7 @@ func TestVanishRejectsUnusableTimestamps(t *testing.T) {
 
 func TestVanishRequestNeedsNoAuthentication(t *testing.T) {
 	store := newMemoryStore()
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	older := signedEventAt(t, skA, nostr.KindTextNote, now-10, "A older")
@@ -250,7 +250,7 @@ func TestVanishRequestNeedsNoAuthentication(t *testing.T) {
 }
 
 func TestVanishRequestCannotBeDeleted(t *testing.T) {
-	relay, _ := newWithVanish(vanishConfig(), newMemoryStore())
+	relay, _, _ := newWithRegistries(vanishConfig(), newMemoryStore())
 	ctx := context.Background()
 	now := nostr.Now()
 
@@ -284,7 +284,7 @@ func TestVanishResumesInterruptedPurgeOnStartup(t *testing.T) {
 		}
 	}
 
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 
 	assertStoredIDs(t, store, newer, vanish)
 	if _, err := relay.AddEvent(khatru.ForceSetAuthed(context.Background(), pkA), older); err == nil {
@@ -347,7 +347,7 @@ func TestVanishRebuildIgnoresRequestsForOtherRelays(t *testing.T) {
 
 func TestVanishFailedPurgeCanBeRetriedByReplay(t *testing.T) {
 	store := &failingStore{memoryStore: newMemoryStore(), failDeletes: 1}
-	relay, registry := newWithVanish(vanishConfig(), store)
+	relay, registry, _ := newWithRegistries(vanishConfig(), store)
 	now := nostr.Now()
 
 	older := signedEventAt(t, skA, nostr.KindTextNote, now-10, "A older")

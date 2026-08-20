@@ -99,6 +99,7 @@ func runImport(cfg privaterelay.Config) error {
 	if vanish.HasUnresolvedRequests() {
 		return fmt.Errorf("this database holds NIP-62 requests to vanish that cannot be evaluated: set RELAY_URL before importing")
 	}
+	deletions := privaterelay.NewDeletionRegistry(store)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	// Nostr events can be large. Let's use a 16MB maximum line buffer capacity.
@@ -127,7 +128,7 @@ func runImport(cfg privaterelay.Config) error {
 			return fmt.Errorf("invalid signature for event %s on line %d", event.ID, count+1)
 		}
 
-		if !vanish.Admit(event) {
+		if !vanish.Admit(event) || !deletions.Admit(event) {
 			skipped++
 			continue
 		}
@@ -142,12 +143,16 @@ func runImport(cfg privaterelay.Config) error {
 		return err
 	}
 
-	// A request to vanish can appear anywhere in the file, including after the
-	// events it covers, and stdin cannot be replayed: sweep once at the end.
+	// A request to vanish or a deletion request can appear anywhere in the file,
+	// including after the events it covers, and stdin cannot be replayed: sweep
+	// once at the end.
 	if err := vanish.PurgeAll(); err != nil {
 		return fmt.Errorf("error enforcing requests to vanish after import: %w", err)
 	}
+	if err := deletions.EnforceAll(); err != nil {
+		return fmt.Errorf("error enforcing deletion requests after import: %w", err)
+	}
 
-	log.Printf("Successfully imported %d events (%d skipped for vanished pubkeys)", count, skipped)
+	log.Printf("Successfully imported %d events (%d skipped as vanished or deleted)", count, skipped)
 	return nil
 }

@@ -3,7 +3,6 @@ package relay
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -24,7 +23,6 @@ const (
 	vanishInvalidTime = "invalid: request to vanish has an unusable created_at"
 
 	vanishBatchSize = 500
-	maxVanishPasses = 100_000
 
 	maxVanishDrift nostr.Timestamp = 900
 )
@@ -182,51 +180,30 @@ func (r *VanishRegistry) purge(pubkey nostr.PubKey, cutoff nostr.Timestamp, keep
 }
 
 func (r *VanishRegistry) purgeFilter(filter nostr.Filter, keep nostr.ID) (int, error) {
-	deleted := 0
-	ids := make([]nostr.ID, 0, r.batchSize)
-
-	for pass := 0; pass < maxVanishPasses; pass++ {
-		// The store yields from inside an open read transaction, so drain the
-		// batch before deleting anything.
-		ids = ids[:0]
-		for event := range r.store.QueryEvents(filter, r.batchSize) {
-			if event.ID == keep {
-				continue
-			}
-			ids = append(ids, event.ID)
-		}
-		if len(ids) == 0 {
-			return deleted, nil
-		}
-
-		for _, id := range ids {
-			if err := r.store.DeleteEvent(id); err != nil {
-				return deleted, fmt.Errorf("failed to delete %s: %w", id.Hex(), err)
-			}
-			deleted++
-		}
-	}
-	return deleted, fmt.Errorf("gave up purging after %d passes", maxVanishPasses)
+	return eraseMatching(r.store, filter, r.batchSize, keep)
 }
 
 func (r *VanishRegistry) rebuild() {
 	filter := nostr.Filter{Kinds: []nostr.Kind{KindRequestToVanish}}
 	seen := make(map[nostr.ID]struct{})
 
-	for pass := 0; pass < maxVanishPasses; pass++ {
-		added := 0
+	limit := r.batchSize
+
+	for pass := 0; pass < maxErasePasses; pass++ {
+		added, yielded := 0, 0
 		oldest := nostr.Timestamp(0)
 
-		for event := range r.store.QueryEvents(filter, r.batchSize) {
+		for event := range r.store.QueryEvents(filter, limit) {
+			yielded++
+			if oldest == 0 || event.CreatedAt < oldest {
+				oldest = event.CreatedAt
+			}
 			if _, duplicate := seen[event.ID]; duplicate {
 				continue
 			}
 			seen[event.ID] = struct{}{}
 			added++
 
-			if oldest == 0 || event.CreatedAt < oldest {
-				oldest = event.CreatedAt
-			}
 			if event.CreatedAt > 0 && r.targetsThisRelay(event) {
 				r.record(event)
 			} else if r.relayURL == "" {
@@ -236,9 +213,16 @@ func (r *VanishRegistry) rebuild() {
 			}
 		}
 
-		if added == 0 || oldest == 0 {
+		if yielded < limit {
 			return
 		}
+		if added == 0 {
+			// Every event of this pass shares filter.Until, so moving Until can
+			// never get past them: widen the window instead of dropping them.
+			limit *= 2
+			continue
+		}
+		limit = r.batchSize
 		filter.Until = oldest
 	}
 }

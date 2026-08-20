@@ -23,11 +23,11 @@ func New(cfg Config) (*khatru.Relay, func(), error) {
 }
 
 func NewWithStore(cfg Config, store eventstore.Store) *khatru.Relay {
-	relay, _ := newWithVanish(cfg, store)
+	relay, _, _ := newWithRegistries(cfg, store)
 	return relay
 }
 
-func newWithVanish(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRegistry) {
+func newWithRegistries(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRegistry, *DeletionRegistry) {
 	relay := khatru.NewRelay()
 	relay.Addr = cfg.Addr
 	relay.ServiceURL = cfg.RelayURL
@@ -59,6 +59,14 @@ func newWithVanish(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRe
 		relay.Log.Printf("WARNING: stored NIP-62 requests to vanish cannot be evaluated without RELAY_URL and are NOT being enforced")
 	}
 
+	deletions := NewDeletionRegistry(store)
+	deletions.log = relay.Log
+	// Catches up on NIP-09 requests whose targets were republished back when the
+	// relay kept no record of them. Synchronous for the same reason as above.
+	if err := deletions.EnforceAll(); err != nil {
+		relay.Log.Printf("failed to enforce stored deletion requests: %v", err)
+	}
+
 	relay.OnConnect = func(ctx context.Context) {
 		khatru.RequestAuth(ctx)
 	}
@@ -66,10 +74,20 @@ func newWithVanish(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRe
 		if reject, msg := requireAuthForEvent(ctx, event); reject {
 			return reject, msg
 		}
-		return vanish.onEvent(event)
+		if reject, msg := vanish.onEvent(event); reject {
+			return reject, msg
+		}
+		return deletions.onEvent(event)
 	}
 	relay.OnEventSaved = vanish.onEventSaved
-	relay.AllowDeleting = vanish.allowDeleting
+	relay.AllowDeleting = func(ctx context.Context, target, deletion nostr.Event) bool {
+		// NIP-09: there is no unrequest deletion, and erasing the request would
+		// let the events it covers come back.
+		if target.Kind == nostr.KindDeletion {
+			return false
+		}
+		return vanish.allowDeleting(ctx, target, deletion)
+	}
 	relay.OnRequest = requireAuthForFilter
 	relay.OnCount = requireAuthForFilter
 	relay.PreventBroadcast = func(ws *khatru.WebSocket, _ nostr.Filter, event nostr.Event) bool {
@@ -82,7 +100,7 @@ func newWithVanish(cfg Config, store eventstore.Store) (*khatru.Relay, *VanishRe
 	relay.Count = private.count
 	relay.CountHLL = private.countHLL
 
-	return relay, vanish
+	return relay, vanish, deletions
 }
 
 func requireAuthForEvent(ctx context.Context, event nostr.Event) (bool, string) {
