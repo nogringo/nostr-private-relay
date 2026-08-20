@@ -135,7 +135,7 @@ func TestNewWithStorePublishesRelayMetadata(t *testing.T) {
 		MaxLimit:    500,
 	}, newMemoryStore())
 
-	if relay.Info.Software != "nostr-private-relay" {
+	if relay.Info.Software != "https://github.com/nogringo/nostr-private-relay" {
 		t.Fatalf("expected software metadata to be set, got %q", relay.Info.Software)
 	}
 	if relay.Info.Icon != "https://example.com/icon.png" {

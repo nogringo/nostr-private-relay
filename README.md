@@ -1,8 +1,8 @@
 # nostr-private-relay
 
-A private relay where only the author can read their own events.
+Multi-user Nostr relay where each author can only read their own events. NIP-42 auth, NIP-37 private relay.
 
-Supported NIPs: 1, 9, 11, 37, 40, 42, 45, 51, 62, 70, 77, 86.
+Supported NIPs: 1, 9, 11, 37, 40, 42, 45, 51, 62, 70, 77.
 
 ## Configuration
 
@@ -14,7 +14,7 @@ Supported NIPs: 1, 9, 11, 37, 40, 42, 45, 51, 62, 70, 77, 86.
 | `RELAY_DESCRIPTION` | `A private relay where only the author can read their own events.` | NIP-11 relay description. |
 | `RELAY_ICON` | empty | Optional NIP-11 icon URL. |
 | `RELAY_CONTACT` | empty | Optional contact info for the relay operator. |
-| `RELAY_PUBKEY` | empty | Optional relay operator pubkey in hex. |
+| `RELAY_PUBKEY` | empty | Optional relay operator pubkey in hex, NIP-11 metadata only. It grants no access and restricts nobody. |
 | `RELAY_LMDB_PATH` | `./data/lmdb` | LMDB directory. |
 | `RELAY_MAX_LIMIT` | `500` | Maximum query limit. |
 

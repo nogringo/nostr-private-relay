@@ -35,7 +35,7 @@ func newWithRegistries(cfg Config, store eventstore.Store) (*khatru.Relay, *Vani
 
 	relay.Info.Name = cfg.Name
 	relay.Info.Description = cfg.Description
-	relay.Info.Software = "nostr-private-relay"
+	relay.Info.Software = "https://github.com/nogringo/nostr-private-relay"
 	relay.Info.Version = version()
 	relay.Info.Icon = cfg.Icon
 	relay.Info.Contact = cfg.Contact
@@ -45,7 +45,7 @@ func newWithRegistries(cfg Config, store eventstore.Store) (*khatru.Relay, *Vani
 		MaxLimit:     cfg.MaxLimit,
 		DefaultLimit: cfg.MaxLimit,
 	}
-	relay.Info.AddSupportedNIPs([]int{37, 51, 62, 77})
+	relay.Info.AddSupportedNIPs([]int{1, 9, 11, 37, 40, 42, 45, 51, 62, 70, 77})
 
 	vanish := NewVanishRegistry(cfg, store)
 	vanish.log = relay.Log

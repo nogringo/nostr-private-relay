@@ -12,6 +12,10 @@ import (
 
 const authRequired = "auth-required: this relay requires NIP-42 authentication"
 
+// NIP-77 syncs a whole collection at once, so it is not bound by the query limit
+// meant for regular subscriptions.
+const negentropyMaxLimit = 1_000_000
+
 type hllCounter interface {
 	CountEventsHLL(filter nostr.Filter, offset int) (uint32, *hyperloglog.HyperLogLog, error)
 }
@@ -72,7 +76,7 @@ func (ps privateStore) countHLL(ctx context.Context, filter nostr.Filter, offset
 
 func (ps privateStore) queryLimit(ctx context.Context) int {
 	if khatru.IsNegentropySession(ctx) {
-		return ps.maxLimit * 20
+		return negentropyMaxLimit
 	}
 	return ps.maxLimit
 }
