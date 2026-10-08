@@ -40,11 +40,13 @@ These backups copy and compact database pages at a consistent transaction state.
   ```
   This creates a compressed snapshot inside the `./backups` folder (e.g., `backup_20260706_162000.mdb.gz`) and automatically deletes backups older than 7 days.
 
+  Backups contain every user's events and are not encrypted: they are created readable by their owner only, and should be encrypted before leaving the server.
+
 * **To restore the database:**
   ```sh
   ./scripts/restore.sh backups/backup_20260706_162000.mdb.gz
   ```
-  *Note: The restore script will stop the container, create a safety backup of your current database, extract the chosen backup, and restart the container.*
+  *Note: The restore script checks the archive, stops the relay, saves the current database to `backups/pre_restore_<timestamp>.mdb.gz` (never deleted by the retention policy), restores the chosen backup into the Docker volume, and restarts the relay.*
 
 ### Logical Backups (JSONL)
 
@@ -74,4 +76,4 @@ These exports write events in standard JSON format (one per line). They can be r
   ```sh
   ./scripts/import_jsonl.sh backups/export_20260706_162000.jsonl.gz
   ```
-  *Note: During import, the relay validates the IDs and cryptographic signatures of all events before storing them.*
+  *Note: During import, the relay validates the IDs and cryptographic signatures of all events before storing them. The script then restarts the relay so that imported deletion requests (NIP-09) and requests to vanish (NIP-62) take effect.*

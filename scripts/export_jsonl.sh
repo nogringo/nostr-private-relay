@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+umask 077
+
 CONTAINER_NAME="nostr-private-relay"
 BACKUP_DIR="./backups"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
@@ -17,7 +20,7 @@ fi
 echo "Exporting events to JSONL..."
 if docker exec -i "${CONTAINER_NAME}" /app/relay -export | gzip > "${BACKUP_FILE}"; then
     echo "Export successful: ${BACKUP_FILE}"
-    echo "Number of events exported: $(zcat "${BACKUP_FILE}" | wc -l)"
+    echo "Number of events exported: $(gunzip -c "${BACKUP_FILE}" | wc -l)"
     echo "Archive size: $(du -h "${BACKUP_FILE}" | cut -f1)"
 else
     echo "Error during export!" >&2

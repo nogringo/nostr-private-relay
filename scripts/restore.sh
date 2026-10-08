@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Configuration
-CONTAINER_NAME="nostr-private-relay"
-DATA_DIR="./data/lmdb"
+SERVICE_NAME="private-relay"
+BACKUP_DIR="./backups"
 BACKUP_FILE="${1:-}"
 
 if [ -z "${BACKUP_FILE}" ]; then
@@ -16,29 +16,46 @@ if [ ! -f "${BACKUP_FILE}" ]; then
     exit 1
 fi
 
+umask 077
+
+# The database lives in a named volume, only reachable from a container mounting it
+run_in_volume() {
+    docker compose run --rm -T --no-deps --entrypoint sh "${SERVICE_NAME}" -c "$1"
+}
+
 echo "=== Starting Restoration ==="
 echo "Source file: ${BACKUP_FILE}"
 
-# 1. Stop the container
-echo "Stopping container '${CONTAINER_NAME}'..."
-docker compose down
+# 1. Check the archive before touching anything
+echo "Checking backup integrity..."
+gunzip -t "${BACKUP_FILE}"
 
-# 2. Keep a safety backup of current data if it exists
-if [ -d "${DATA_DIR}" ] && [ "$(ls -A "${DATA_DIR}")" ]; then
-    TEMP_BACKUP="./data/lmdb_pre_restore_$(date +%Y%m%d_%H%M%S)"
-    echo "Backing up current database to ${TEMP_BACKUP} for safety..."
-    mv "${DATA_DIR}" "${TEMP_BACKUP}"
+# 2. Stop the relay
+echo "Stopping service '${SERVICE_NAME}'..."
+docker compose stop "${SERVICE_NAME}"
+
+# 3. Keep a safety backup of current data if it exists
+if run_in_volume 'test -s /app/data/lmdb/data.mdb'; then
+    mkdir -p "${BACKUP_DIR}"
+    SAFETY_FILE="${BACKUP_DIR}/pre_restore_$(date +%Y%m%d_%H%M%S).mdb.gz"
+    echo "Backing up current database to ${SAFETY_FILE} for safety..."
+    if ! run_in_volume 'mdb_copy -c /app/data/lmdb' | gzip > "${SAFETY_FILE}"; then
+        echo "Error during safety backup, nothing was restored. The relay is still stopped." >&2
+        rm -f "${SAFETY_FILE}"
+        exit 1
+    fi
 fi
 
-# Create a clean folder
-mkdir -p "${DATA_DIR}"
-
-# 3. Restore the database
+# 4. Restore the database
 echo "Decompressing and restoring database..."
-gunzip -c "${BACKUP_FILE}" > "${DATA_DIR}/data.mdb"
+gunzip -c "${BACKUP_FILE}" | run_in_volume '
+    cd /app/data/lmdb &&
+    cat > data.mdb.restoring &&
+    mv data.mdb.restoring data.mdb &&
+    rm -f lock.mdb'
 
-# 4. Restart the container
-echo "Restarting container..."
+# 5. Restart the relay
+echo "Restarting service..."
 docker compose up -d
 
 echo "=== Restoration completed successfully ==="

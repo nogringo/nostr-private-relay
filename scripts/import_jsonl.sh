@@ -29,4 +29,8 @@ else
     docker exec -i "${CONTAINER_NAME}" /app/relay -import < "${BACKUP_FILE}"
 fi
 
+# The running relay only loads NIP-09 and NIP-62 requests at startup
+echo "Restarting relay to apply imported deletion requests..."
+docker restart "${CONTAINER_NAME}" > /dev/null
+
 echo "=== Import completed ==="

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+umask 077
+
 # Configuration
 CONTAINER_NAME="nostr-private-relay"
 BACKUP_DIR="./backups"
@@ -21,8 +24,9 @@ fi
 
 # Perform hot copy with mdb_copy and compress on the fly
 # Note: docker exec is used WITHOUT the -t flag to avoid binary stream corruption (CRLF translation)
+# mdb_copy writes to stdout only when no dstpath is given: "-" would be taken as a directory name
 echo "Extracting and compacting database..."
-if docker exec -i "${CONTAINER_NAME}" mdb_copy -c /app/data/lmdb - | gzip > "${BACKUP_FILE}"; then
+if docker exec -i "${CONTAINER_NAME}" mdb_copy -c /app/data/lmdb | gzip > "${BACKUP_FILE}"; then
     echo "Backup successful: ${BACKUP_FILE}"
     echo "Compressed size: $(du -h "${BACKUP_FILE}" | cut -f1)"
 else
