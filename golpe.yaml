@@ -130,8 +130,8 @@ config:
     noReload: true
 
   - name: events__maxEventSize
-    desc: "Maximum size of normalised JSON, in bytes"
-    default: 65536
+    desc: "Maximum size of normalised JSON, in bytes (the default fits the largest NIP-44 payload)"
+    default: 131072
   - name: events__rejectEventsNewerThanSeconds
     desc: "Events newer than this will be rejected"
     default: 900 # 15 mins

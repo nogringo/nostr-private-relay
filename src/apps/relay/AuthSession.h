@@ -5,14 +5,14 @@
 #include <cstring>
 #include <string_view>
 
-#include "Bytes32.h"
+#include "AuthedPubkeys.h"
 
 struct AuthSession {
 
   static constexpr size_t kChallengeSize = 22;
 
   std::array<char, kChallengeSize> challenge{};
-  Bytes32 authed;
+  AuthedPubkeys authed;
 
   AuthSession(std::string_view token) {
     if (token.size() != kChallengeSize)
@@ -20,9 +20,7 @@ struct AuthSession {
     ::memcpy(challenge.data(), token.data(), kChallengeSize);
   }
 
-  void markAuthed(Bytes32 pubkey) { authed = pubkey; }
-
-  bool isAuthed() const { return !authed.isNull(); }
+  bool isAuthed() const { return !authed.empty(); }
 
   std::string_view challengeSv() const {
     return std::string_view(challenge.data(), challenge.size());

@@ -58,9 +58,10 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
 
     auto supportedNips = []{
-        tao::json::value output = tao::json::value::array({ 1, 2, 4, 9, 11, 28, 40, 59, 70 });
+        tao::json::value output = tao::json::value::array({ 1, 2, 4, 9, 11, 28, 40, 59, 62, 70 });
 
         if (cfg().relay__auth__enabled && cfg().relay__auth__serviceUrl.size() > 0) output.push_back(42);
+        if (cfg().relay__auth__authorOnlyReads) output.push_back(37);
         if (cfg().relay__maxFilterLimitCount > 0) output.push_back(45);
         if (cfg().relay__negentropy__enabled) output.push_back(77);
 
@@ -91,13 +92,16 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
             tao::json::value nip11 = tao::json::value({
                 { "supported_nips", supportedNips() },
-                { "software", "git+https://github.com/hoytech/strfry.git" },
+                { "software", "git+https://github.com/nogringo/nostr-private-relay.git" },
                 { "version", APP_GIT_VERSION },
                 { "negentropy", negentropy::PROTOCOL_VERSION - 0x60 },
                 { "limitation", tao::json::value({
                     { "max_message_length", cfg().relay__maxWebsocketPayloadSize },
                     { "max_subscriptions", cfg().relay__maxSubsPerConnection },
                     { "max_limit", cfg().relay__maxFilterLimit },
+                    { "max_event_tags", cfg().events__maxNumTags },
+                    { "auth_required", cfg().relay__auth__authorOnlyReads && cfg().relay__auth__authorOnlyWrites },
+                    { "restricted_writes", cfg().relay__auth__authorOnlyWrites || cfg().relay__writePolicy__plugin.size() > 0 },
                 }) },
             });
 
@@ -279,6 +283,8 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         ;
 
         PrometheusMetrics::getInstance().activeConnections.inc();
+
+        tpIngester.dispatch(connId, MsgIngester{MsgIngester::NewConn{connId}});
 
         if (cfg().relay__enableTcpKeepalive) {
             int optval = 1;

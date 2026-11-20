@@ -90,7 +90,7 @@ struct NegentropyViews {
 void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
     QueryScheduler queries;
     NegentropyViews views;
-    flat_hash_map<uint64_t, Bytes32> connIdToAuthedPubkey;
+    AuthedPubkeysByConn authedPubkeys;
 
     auto handleReconcile = [&](uint64_t connId, const SubId &subId, negentropy::StorageBase &storage, const std::string &msg) {
         std::string resp;
@@ -168,10 +168,8 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
             try {
                 auto ev = lookupEventByLevId(txn, levId);
                 PackedEventView packed(ev.buf);
-                auto it = connIdToAuthedPubkey.find(sub.connId);
-                Bytes32 subscriberAuthedPubkey = it == connIdToAuthedPubkey.end() ? Bytes32() : it->second;
 
-                if (ReadRestrictor::shouldSendToSubscriber(packed, subscriberAuthedPubkey))
+                if (ReadRestrictor::shouldSendToSubscriber(packed, authedPubkeys.get(sub.connId)))
                 view->storageVector.insert(packed.created_at(), packed.id());
             } catch (std::exception &) {
                 // levId was deleted when query was paused
@@ -265,14 +263,15 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
 
                     handleReconcile(msg->connId, msg->subId, subStorage, msg->negPayload);
                 }
-            } else if (auto msg = std::get_if<MsgNegentropy::SetAuth>(&newMsg.msg)) {
-                connIdToAuthedPubkey[msg->connId] = msg->authed;
+            } else if (auto msg = std::get_if<MsgNegentropy::AddAuth>(&newMsg.msg)) {
+                authedPubkeys.add(msg->connId, msg->pubkey);
             } else if (auto msg = std::get_if<MsgNegentropy::NegClose>(&newMsg.msg)) {
                 LI << "[" << msg->connId << "] negentropy CLOSE session=" << msg->subId.sv();
 
                 queries.removeSub(msg->connId, msg->subId);
                 views.removeView(msg->connId, msg->subId);
             } else if (auto msg = std::get_if<MsgNegentropy::CloseConn>(&newMsg.msg)) {
+                authedPubkeys.erase(msg->connId);
                 queries.closeConn(msg->connId);
                 views.closeConn(msg->connId);
             }

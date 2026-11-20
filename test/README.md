@@ -10,6 +10,10 @@ Tests should be run from the *root* of the project.
 
     node test/readRestrictTest.js
 
+## Private storage tests (NIP-37 author-only reads and writes, NIP-42 multi-pubkey AUTH, NIP-62 vanish):
+
+    node test/tests/privateStorageTest.js
+
 ## Fuzz tests
 
 Note that these tests need a well populated DB. For best coverage, use the [wellordered 500k](https://wiki.wellorder.net/wiki/nostr-datasets/) data-set:

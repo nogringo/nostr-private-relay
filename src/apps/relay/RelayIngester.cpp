@@ -1,6 +1,18 @@
 #include "RelayServer.h"
+#include "RelayUrl.h"
 #include "jsonParseUtils.h"
 #include "ReadRestrictor.h"
+
+
+static bool privateStorage() {
+    return cfg().relay__auth__authorOnlyReads || cfg().relay__auth__authorOnlyWrites;
+}
+
+static const AuthedPubkeys &sessionPubkeys(const RelayServerCtx &rsctx, uint64_t connId) {
+    static const AuthedPubkeys none;
+    auto it = rsctx.connIdToAuthSession.find(connId);
+    return it == rsctx.connIdToAuthSession.end() ? none : it->second.authed;
+}
 
 
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
@@ -14,12 +26,17 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
         std::vector<MsgWriter> writerMsgs;
 
         for (auto &newMsg : newMsgs) {
-            if (auto msg = std::get_if<MsgIngester::ClientMessage>(&newMsg.msg)) {
+            if (auto msg = std::get_if<MsgIngester::NewConn>(&newMsg.msg)) {
+                // Nothing works here without AUTH, so let clients sign in before their first request
+                if (privateStorage() && cfg().relay__auth__serviceUrl.size()) {
+                    sendAuthChallenge(msg->connId, ingesterChallenge(rsctx, msg->connId));
+                }
+            } else if (auto msg = std::get_if<MsgIngester::ClientMessage>(&newMsg.msg)) {
                 try {
                     if (msg->payload.starts_with('[')) {
                         auto payload = tao::json::from_string(msg->payload);
 
-                        if (cfg().relay__logging__dumpInAll) LI << "[" << msg->connId << "] dumpInAll: " << msg->payload; 
+                        if (cfg().relay__logging__dumpInAll) LI << "[" << msg->connId << "] dumpInAll: " << msg->payload;
 
                         auto &arr = jsonGetArray(payload, "message is not an array");
                         if (arr.size() < 2) throw herr("too few array elements");
@@ -28,7 +45,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
 
                         if (cmd == "EVENT") {
                             PROM_INC_CLIENT_MSG(cmd);
-                            if (cfg().relay__logging__dumpInEvents) LI << "[" << msg->connId << "] dumpInEvent: " << msg->payload; 
+                            if (cfg().relay__logging__dumpInEvents) LI << "[" << msg->connId << "] dumpInEvent: " << msg->payload;
 
                             try {
                                 ingesterProcessEvent(txn, rsctx, msg->connId, msg->ipAddr, arr[1], writerMsgs);
@@ -50,19 +67,19 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                             }
                         } else if (cmd == "REQ" || cmd == "COUNT") {
                             PROM_INC_CLIENT_MSG(cmd);
-                            if (cfg().relay__logging__dumpInReqs) LI << "[" << msg->connId << "] dumpInReq: " << msg->payload; 
+                            if (cfg().relay__logging__dumpInReqs) LI << "[" << msg->connId << "] dumpInReq: " << msg->payload;
 
                             std::string subIdStr;
 
                             try {
                                 ingesterProcessReq(txn, rsctx, msg->connId, arr, cmd == "COUNT", subIdStr);
                             } catch (std::exception &e) {
-                                if (subIdStr.size()) sendClosedError(msg->connId, subIdStr, std::string("bad req: ") + e.what());
+                                if (subIdStr.size()) sendClosedError(msg->connId, subIdStr, std::string("error: bad req: ") + e.what());
                                 else sendNoticeError(msg->connId, std::string("bad req: ") + e.what());
                             }
                         } else if (cmd == "CLOSE") {
                             PROM_INC_CLIENT_MSG(cmd);
-                            if (cfg().relay__logging__dumpInReqs) LI << "[" << msg->connId << "] dumpInReq: " << msg->payload; 
+                            if (cfg().relay__logging__dumpInReqs) LI << "[" << msg->connId << "] dumpInReq: " << msg->payload;
 
                             try {
                                 ingesterProcessClose(txn, msg->connId, arr);
@@ -93,7 +110,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
             } else if (auto msg = std::get_if<MsgIngester::CloseConn>(&newMsg.msg)) {
                 auto connId = msg->connId;
 
-                PrometheusMetrics::getInstance().authenticatedConnections.dec();
+                if (sessionPubkeys(rsctx, connId).size()) PrometheusMetrics::getInstance().authenticatedConnections.dec();
                 rsctx.connIdToAuthSession.erase(connId);
 
                 tpWriter.dispatch(connId, MsgWriter{MsgWriter::CloseConn{connId}});
@@ -106,6 +123,17 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
             tpWriter.dispatchMulti(0, writerMsgs);
         }
     }
+}
+
+std::string RelayServer::ingesterChallenge(RelayServerCtx &rsctx, uint64_t connId) {
+    auto it = rsctx.connIdToAuthSession.find(connId);
+
+    if (it == rsctx.connIdToAuthSession.end()) {
+        it = rsctx.connIdToAuthSession.emplace(connId, rsctx.challengeGenerator.get()).first;
+        LI << "[" << connId << "] Requesting initial AUTH";
+    }
+
+    return std::string(it->second.challengeSv());
 }
 
 void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, std::string ipAddr, const tao::json::value &origJson, std::vector<MsgWriter> &output) {
@@ -137,54 +165,45 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
             return true;
         });
 
-        if (foundProtected) {
+        // NIP-62: a request to vanish is signed by the pubkey it erases, so it needs no AUTH
+        bool ownerOnly = cfg().relay__auth__authorOnlyWrites && !isVanishRequestForThisRelay(origJson);
+
+        if (foundProtected || ownerOnly) {
             // NIP-70 protected events must be rejected unless published by an authenticated public key
             // that matches the event author, so we do all the AUTH flow here
 
             auto idHex = to_hex(packed.id());
 
-            if (!cfg().relay__auth__enabled) {
+            if (foundProtected && !cfg().relay__auth__enabled) {
                 LI << "[" << connId << "] Protected event and auth disabled, rejecting: " << idHex;
                 sendOKResponse(connId, idHex, false, "blocked: event marked as protected");
                 return;
             }
 
             if (cfg().relay__auth__serviceUrl.empty()) {
-                // If we don't have a serviceUrl, just fail
-                LI << "[" << connId << "] Protected event and no serviceUrl configured, rejecting: " << idHex;
-                sendOKResponse(connId, idHex, false, "blocked: event marked as protected");
+                LI << "[" << connId << "] Event needs AUTH and no serviceUrl configured, rejecting: " << idHex;
+                sendOKResponse(connId, idHex, false, foundProtected ? "blocked: event marked as protected" : "blocked: this relay can't authenticate clients");
                 return;
             }
 
-            auto it = rsctx.connIdToAuthSession.find(connId);
+            const auto &authed = sessionPubkeys(rsctx, connId);
+            Bytes32 owner = ReadRestrictor::authedOwner(packed, authed);
 
-            if (it == rsctx.connIdToAuthSession.end()) {
-                // we haven't sent an AUTH event for this, so first we generate a challenge for this connection
-                auto challenge = rsctx.challengeGenerator.get();
-                
-                rsctx.connIdToAuthSession.emplace(connId, challenge);
+            bool allowed = (!foundProtected || authed.contains(packed.pubkey())) && (!ownerOnly || !owner.isNull());
 
-                LI << "[" << connId << "] Protected event, requesting AUTH: " << idHex;
-                sendAuthChallenge(connId, challenge);
-                sendOKResponse(connId, idHex, false, "auth-required: event marked as protected");
-                return;
-            }
-
-            const auto &as = it->second;
-
-            if (!as.isAuthed()) {
-                // not authenticated
-                LI << "[" << connId << "] Protected event, AUTH already requested: " << idHex;
-                sendOKResponse(connId, idHex, false, "auth-required: event marked as protected");
-                return;
-            } else if (as.authed != packed.pubkey()) {
-                // authenticated as someone else
-                sendOKResponse(connId, idHex, false, "restricted: must be published by the author");
+            if (!allowed) {
+                if (authed.empty()) {
+                    LI << "[" << connId << "] Event needs AUTH, requesting it: " << idHex;
+                    sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+                    sendOKResponse(connId, idHex, false, foundProtected ? "auth-required: event marked as protected" : "auth-required: this relay only stores events of authenticated users");
+                } else {
+                    sendOKResponse(connId, idHex, false, foundProtected ? "restricted: must be published by the author" : "restricted: this relay only stores events from their author, or gift wraps from their recipient");
+                }
                 return;
             }
 
             // otherwise we proceed to accept the event
-            authedPubkey = as.authed;
+            authedPubkey = owner;
         }
     }
 
@@ -224,35 +243,47 @@ void RelayServer::ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint
         throw herr("filter validation failed: ", e.what());
     }
 
-    auto it = rsctx.connIdToAuthSession.find(connId);
-    bool hasSession = it != rsctx.connIdToAuthSession.end();
-    bool isAuthed = hasSession && !it->second.authed.isNull();
+    const auto &authed = sessionPubkeys(rsctx, connId);
+
+    if (ReadRestrictor::authorOnly()) {
+        if (authed.empty()) {
+            sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+            sendClosedError(connId, outSubIdStr, "auth-required: this relay only serves events to their authenticated author");
+            return;
+        }
+
+        bool restricted = false;
+        auto ownFilters = ReadRestrictor::narrowFilters(std::span<const tao::json::value>(arr.get_array()).subspan(2), authed, maxFilterLimit, restricted);
+
+        if (restricted) {
+            sendClosedError(connId, outSubIdStr, "restricted: this relay only serves events to their author");
+            return;
+        }
+
+        Subscription sub(connId, outSubIdStr, std::move(ownFilters), countOnly);
+        tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::NewSub{std::move(sub)}});
+        return;
+    }
+
     bool shouldRejectReq = false;
 
     if (countOnly) {
         // COUNT can't be filtered per event, so a restricted-kind filter must be
         // scoped to the client's own pubkeys via authors/#p.
-        shouldRejectReq = !ReadRestrictor::isFilterAllowedToCount(filterGroup, isAuthed ? it->second.authed : Bytes32());
+        shouldRejectReq = !ReadRestrictor::isFilterAllowedToCount(filterGroup, authed);
     } else {
         // if the filter group contains no filter that has a kind that is not restricted,
         // that means an unauthenticated client won't be able to see anything
         if (ReadRestrictor::isFilterGroupFullyRestricted(filterGroup)) {
-            shouldRejectReq = !isAuthed;
+            shouldRejectReq = authed.empty();
         }
     }
 
     if (shouldRejectReq) {
-        if (!hasSession) {
-            auto challenge = rsctx.challengeGenerator.get();
-            rsctx.connIdToAuthSession.emplace(connId, challenge);
-            LI << "[" << connId << "] Requesting initial AUTH";
-            sendAuthChallenge(connId, challenge);
-            sendClosedError(connId, outSubIdStr, "auth-required: requested filter requires authentication");
-        } else if (countOnly && isAuthed) {
+        if (countOnly && !authed.empty()) {
             sendClosedError(connId, outSubIdStr, "count-failed: can only count events you are involved in");
         } else {
-            auto challenge = it->second.challengeSv();
-            sendAuthChallenge(connId, challenge);
+            sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
             sendClosedError(connId, outSubIdStr, "auth-required: requested filter requires authentication");
         }
         return;
@@ -267,16 +298,6 @@ void RelayServer::ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const ta
     if (arr.get_array().size() != 2) throw herr("arr too small/big");
 
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::RemoveSub{connId, SubId(jsonGetString(arr[1], "CLOSE subscription id was not a string"))}});
-}
-
-static std::string normalizeRelayUrl(std::string_view url) {
-    auto pos = url.find("://");
-    if (pos != std::string_view::npos) url.remove_prefix(pos + 3);
-    pos = url.find_first_of("/?#");
-    if (pos != std::string_view::npos) url = url.substr(0, pos);
-    std::string result(url);
-    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c){ return std::tolower(c); });
-    return result;
 }
 
 void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson) {
@@ -295,8 +316,6 @@ void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, co
     if (it == rsctx.connIdToAuthSession.end()) throw herr("no auth status available for connection");
 
     auto &as = it->second;
-
-    if (as.isAuthed()) throw herr("already authenticated");
 
     bool foundChallenge = false;
     bool foundCorrectRelayUrl = false;
@@ -318,15 +337,33 @@ void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, co
     if (!foundChallenge) throw herr("challenge string mismatch");
     if (!foundCorrectRelayUrl) throw herr("incorrect or missing relay tag, expected: " + cfg().relay__auth__serviceUrl);
 
-    // set the connection as authenticated with this pubkey
-    as.markAuthed(packed.pubkey());
-    tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::SetAuth{connId, packed.pubkey()}});
-    tpReqMonitor.dispatch(connId, MsgReqMonitor{MsgReqMonitor::SetAuth{connId, packed.pubkey()}});
+    auto idHex = to_hex(packed.id());
+
+    if (as.authed.contains(packed.pubkey())) {
+        sendOKResponse(connId, idHex, true, "duplicate: already authenticated");
+        return;
+    }
+
+    if (as.authed.size() >= cfg().relay__auth__maxPubkeysPerConnection) {
+        PrometheusMetrics::getInstance().authFailureTotal.inc();
+        sendOKResponse(connId, idHex, false, "restricted: too many pubkeys authenticated on this connection");
+        return;
+    }
+
+    // NIP-42: every pubkey a client AUTHs as stays authenticated for the connection
+    Bytes32 pubkey(packed.pubkey());
+    bool firstPubkey = as.authed.empty();
+    as.authed.add(pubkey);
+
+    tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::AddAuth{connId, pubkey}});
+    tpReqMonitor.dispatch(connId, MsgReqMonitor{MsgReqMonitor::AddAuth{connId, pubkey}});
+    tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::AddAuth{connId, pubkey}});
+
     PrometheusMetrics::getInstance().authSuccessTotal.inc();
-    PrometheusMetrics::getInstance().authenticatedConnections.inc();
+    if (firstPubkey) PrometheusMetrics::getInstance().authenticatedConnections.inc();
 
     LI << "[" << connId << "] AUTHed as " << to_hex(packed.pubkey());
-    sendOKResponse(connId, to_hex(packed.id()), true, "successfully authenticated");
+    sendOKResponse(connId, idHex, true, "successfully authenticated");
 }
 
 void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &arr) {
@@ -337,47 +374,70 @@ void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsct
     const auto &cmd = jsonGetString(vals[0], "negentropy command was not a string");
     const auto &subscriptionStr = jsonGetString(vals[1], "NEG subscription id was not a string");
 
+    auto sendNegErr = [&](std::string_view reason){
+        PROM_INC_RELAY_MSG("NEG-ERR");
+        sendToConn(connId, tao::json::to_string(tao::json::value::array({
+            "NEG-ERR",
+            subscriptionStr,
+            reason
+        })));
+    };
+
     if (cmd == "NEG-OPEN") {
         if (vals.size() < 4) throw herr("negentropy query missing elements");
 
         auto maxFilterLimit = cfg().relay__negentropy__maxSyncEvents + 1;
 
-        auto filterJson = vals[2];
+        const auto &filterJson = vals[2];
         if (!filterJson.is_object()) throw herr("negentropy filter must be an object");
 
-        NostrFilterGroup filter(filterJson, maxFilterLimit);
+        // validates the filter before anything else uses it
+        NostrFilter requested(filterJson, maxFilterLimit);
 
-        // if the filter group contains no filter that has a kind that is not restricted,
-        // that means an unauthenticated client won't be able to see anything
-        if (ReadRestrictor::isFilterGroupFullyRestricted(filter)) {
-            auto it = rsctx.connIdToAuthSession.find(connId);
-            bool hasSession = it != rsctx.connIdToAuthSession.end();
-            bool isAuthed = hasSession && !it->second.authed.isNull();
-            if (!isAuthed) {
-                std::string challenge;
-                if (!hasSession) {
-                    challenge = rsctx.challengeGenerator.get();
-                    rsctx.connIdToAuthSession.emplace(connId, challenge);
-                    LI << "[" << connId << "] Requesting initial AUTH";
-                } else {
-                    challenge = it->second.challengeSv();
-                }
-                sendAuthChallenge(connId, challenge);
-                PROM_INC_RELAY_MSG("NEG-ERR");
-                sendToConn(connId, tao::json::to_string(tao::json::value::array({
-                    "NEG-ERR",
-                    subscriptionStr,
-                    "auth-required: requested filter requires authentication"
-                })));
+        const auto &authed = sessionPubkeys(rsctx, connId);
+        std::vector<tao::json::value> filters;
+
+        if (ReadRestrictor::authorOnly()) {
+            if (authed.empty()) {
+                sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+                sendNegErr("auth-required: this relay only serves events to their authenticated author");
                 return;
             }
+
+            if (requested.neverMatch) {
+                filters.push_back(filterJson);
+            } else {
+                ReadRestrictor::narrowFilter(filterJson, authed, filters);
+
+                if (filters.empty()) {
+                    sendNegErr("restricted: this relay only serves events to their author");
+                    return;
+                }
+            }
+        } else {
+            // if the filter group contains no filter that has a kind that is not restricted,
+            // that means an unauthenticated client won't be able to see anything
+            if (ReadRestrictor::isFilterGroupFullyRestricted(NostrFilterGroup(filterJson, maxFilterLimit)) && authed.empty()) {
+                sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+                sendNegErr("auth-required: requested filter requires authentication");
+                return;
+            }
+
+            filters.push_back(filterJson);
         }
 
-        Subscription sub(connId, subscriptionStr, std::move(filter));
+        NostrFilterGroup filterGroup;
+        for (const auto &f : filters) filterGroup.addFilter(f, maxFilterLimit);
 
-        filterJson.get_object().erase("since");
-        filterJson.get_object().erase("until");
-        std::string filterStr = tao::json::to_string(filterJson);
+        Subscription sub(connId, subscriptionStr, std::move(filterGroup));
+
+        // A pre-computed negentropy tree stands for exactly one filter
+        std::string filterStr;
+        if (filters.size() == 1) {
+            filters[0].get_object().erase("since");
+            filters[0].get_object().erase("until");
+            filterStr = tao::json::to_string(filters[0]);
+        }
 
         std::string negPayload = from_hex(jsonGetString(vals[3], "negentropy payload not a string"));
 

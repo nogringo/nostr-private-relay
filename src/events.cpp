@@ -2,6 +2,7 @@
 
 #include "events.h"
 #include "jsonParseUtils.h"
+#include "RelayUrl.h"
 
 
 std::string nostrJsonToPackedEvent(const tao::json::value &v) {
@@ -243,6 +244,46 @@ bool deleteEventBasic(lmdb::txn &txn, uint64_t levId) {
 }
 
 
+bool isVanishRequestForThisRelay(const tao::json::value &evJson) {
+    if (!evJson.at("kind").is_integer() || evJson.at("kind").as<uint64_t>() != 62) return false;
+
+    std::string serviceHost = normalizeRelayUrl(cfg().relay__auth__serviceUrl);
+
+    for (const auto &tagj : evJson.at("tags").get_array()) {
+        const auto &tag = tagj.get_array();
+        if (tag.size() < 2 || !tag[0].is_string() || !tag[1].is_string()) continue;
+        if (tag[0].get_string() != "relay") continue;
+
+        const auto &url = tag[1].get_string();
+        if (url == "ALL_RELAYS") return true;
+        if (serviceHost.size() && normalizeRelayUrl(url) == serviceHost) return true;
+    }
+
+    return false;
+}
+
+// created_at of the newest request to vanish from this pubkey that applies to this relay
+static std::optional<uint64_t> vanishedUntil(lmdb::txn &txn, std::optional<Decompressor> &decomp, std::string_view pubkey) {
+    std::optional<uint64_t> output;
+
+    env.generic_foreachFull(txn, env.dbi_Event__pubkeyKind, makeKey_StringUint64Uint64(pubkey, 62, MAX_U64), lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
+        ParsedKey_StringUint64Uint64 parsedKey(k);
+        if (parsedKey.s != pubkey || parsedKey.n1 != 62) return false;
+
+        if (!decomp) decomp.emplace();
+
+        if (isVanishRequestForThisRelay(tao::json::from_string(getEventJson(txn, *decomp, lmdb::from_sv<uint64_t>(v))))) {
+            output = parsedKey.n2;
+            return false;
+        }
+
+        return true;
+    }, true);
+
+    return output;
+}
+
+
 static bool isEventABeforeEventB(const PackedEventView &a, const PackedEventView &b) {
     // If timestamps are equal, then according to NIP-01, the one with the *greatest* lexical id is considered "earlier" (ie, discarded).
     return a.created_at() < b.created_at() || (a.created_at() == b.created_at() && a.id() > b.id());
@@ -259,6 +300,12 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
 
     std::vector<uint64_t> levIdsToDelete;
     std::string tmpBuf;
+    std::optional<Decompressor> decomp;
+
+    auto isVanished = [&](std::string_view pubkey, uint64_t createdAt){
+        auto until = vanishedUntil(txn, decomp, pubkey);
+        return until && createdAt <= *until;
+    };
 
     neFilterCache.ctx(txn, [&](const std::function<void(const PackedEventView &, bool)> &updateNegentropy){
         for (size_t i = 0; i < evs.size(); i++) {
@@ -271,7 +318,14 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 continue;
             }
 
-            if (env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(packed.pubkey()))) {
+            // NIP-62: a deletion request has no effect on a request to vanish
+            if (packed.kind() != 62 && env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(packed.pubkey()))) {
+                ev.status = EventWriteStatus::Deleted;
+                continue;
+            }
+
+            // NIP-62: what a request to vanish deleted can't be published again
+            if (isVanished(packed.pubkey(), packed.created_at())) {
                 ev.status = EventWriteStatus::Deleted;
                 continue;
             }
@@ -281,7 +335,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
             if (packed.kind() == 1059 || packed.kind() == 21059) {
                 bool recipientDeleted = false;
                 packed.foreachTag([&](char tagName, std::string_view tagVal){
-                    if (tagName == 'p' && env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(tagVal))) {
+                    if (tagName == 'p' && (env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(tagVal)) || isVanished(tagVal, packed.created_at()))) {
                         recipientDeleted = true;
                         return false;
                     }
@@ -344,6 +398,28 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 }
             }
 
+            if (packed.kind() == 62 && ev.status == EventWriteStatus::Pending && isVanishRequestForThisRelay(tao::json::from_string(ev.jsonStr))) {
+                // NIP-62: delete everything from the pubkey up to the request, and every gift wrap addressed to it
+                env.generic_foreachFull(txn, env.dbi_Event__pubkey, makeKey_StringUint64(packed.pubkey(), 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+                    ParsedKey_StringUint64 parsedKey(k);
+                    if (parsedKey.s != packed.pubkey() || parsedKey.n > packed.created_at()) return false;
+                    levIdsToDelete.push_back(lmdb::from_sv<uint64_t>(v));
+                    return true;
+                });
+
+                std::string wrapTag = std::string("p") + std::string(packed.pubkey());
+                env.generic_foreachFull(txn, env.dbi_Event__tag, makeKey_StringUint64(wrapTag, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+                    ParsedKey_StringUint64 parsedKey(k);
+                    if (parsedKey.s != wrapTag) return false;
+                    uint64_t levId = lmdb::from_sv<uint64_t>(v);
+                    auto kind = PackedEventView(lookupEventByLevId(txn, levId).buf).kind();
+                    if (kind == 1059 || kind == 21059) levIdsToDelete.push_back(levId);
+                    return true;
+                });
+
+                if (logDeletions) LI << "Request to vanish from " << to_hex(packed.pubkey()) << ", deleting " << levIdsToDelete.size() << " events";
+            }
+
             if (packed.kind() == 5) {
                 // Deletion event, delete all referenced events
                 packed.foreachTag([&](char tagName, std::string_view tagVal){
@@ -351,7 +427,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                         auto otherEv = lookupEventById(txn, tagVal);
                         if (otherEv) {
                             auto otherPacked = PackedEventView(otherEv->buf);
-                            bool canDelete = otherPacked.pubkey() == packed.pubkey();
+                            bool canDelete = otherPacked.pubkey() == packed.pubkey() && otherPacked.kind() != 62;
 
                             // NIP-59: gift wraps (kind 1059/21059) are signed by a random one-time-use
                             // key, so the recipient is never the author. Per NIP-59, relays SHOULD delete

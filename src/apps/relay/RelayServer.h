@@ -50,6 +50,10 @@ struct MsgWebsocket : NonCopyable {
 };
 
 struct MsgIngester : NonCopyable {
+    struct NewConn {
+        uint64_t connId;
+    };
+
     struct ClientMessage {
         uint64_t connId;
         std::string ipAddr;
@@ -60,7 +64,7 @@ struct MsgIngester : NonCopyable {
         uint64_t connId;
     };
 
-    using Var = std::variant<ClientMessage, CloseConn>;
+    using Var = std::variant<NewConn, ClientMessage, CloseConn>;
     Var msg;
     MsgIngester(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -88,9 +92,9 @@ struct MsgReqWorker : NonCopyable {
         Subscription sub;
     };
 
-    struct SetAuth {
+    struct AddAuth {
         uint64_t connId;
-        Bytes32 authed;
+        Bytes32 pubkey;
     };
 
     struct RemoveSub {
@@ -102,7 +106,7 @@ struct MsgReqWorker : NonCopyable {
         uint64_t connId;
     };
 
-    using Var = std::variant<NewSub, SetAuth, RemoveSub, CloseConn>;
+    using Var = std::variant<NewSub, AddAuth, RemoveSub, CloseConn>;
     Var msg;
     MsgReqWorker(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -112,9 +116,9 @@ struct MsgReqMonitor : NonCopyable {
         Subscription sub;
     };
 
-    struct SetAuth {
+    struct AddAuth {
         uint64_t connId;
-        Bytes32 authed;
+        Bytes32 pubkey;
     };
 
     struct RemoveSub {
@@ -129,7 +133,7 @@ struct MsgReqMonitor : NonCopyable {
     struct DBChange {
     };
 
-    using Var = std::variant<NewSub, SetAuth, RemoveSub, CloseConn, DBChange>;
+    using Var = std::variant<NewSub, AddAuth, RemoveSub, CloseConn, DBChange>;
     Var msg;
     MsgReqMonitor(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -147,9 +151,9 @@ struct MsgNegentropy : NonCopyable {
         std::string negPayload;
     };
 
-    struct SetAuth {
+    struct AddAuth {
         uint64_t connId;
-        Bytes32 authed;
+        Bytes32 pubkey;
     };
 
     struct NegClose {
@@ -161,7 +165,7 @@ struct MsgNegentropy : NonCopyable {
         uint64_t connId;
     };
 
-    using Var = std::variant<NegOpen, SetAuth, NegMsg, NegClose, CloseConn>;
+    using Var = std::variant<NegOpen, AddAuth, NegMsg, NegClose, CloseConn>;
     Var msg;
     MsgNegentropy(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -197,6 +201,7 @@ struct RelayServer {
     void ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &arr, bool countOnly, std::string &outSubIdStr);
     void ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const tao::json::value &arr);
     void ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson);
+    std::string ingesterChallenge(RelayServerCtx &rsctx, uint64_t connId);
     void ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &origJson);
 
     void runWriter(ThreadPool<MsgWriter>::Thread &thr);
@@ -255,7 +260,7 @@ struct RelayServer {
     void sendClosedError(uint64_t connId, const std::string &subId, std::string &&payload) {
         PROM_INC_RELAY_MSG("CLOSED");
         LI << "sending closed to [" << connId << "]: " << payload;
-        auto reply = tao::json::value::array({ "CLOSED", subId, std::string("ERROR: ") + payload });
+        auto reply = tao::json::value::array({ "CLOSED", subId, payload });
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::Send{connId, std::move(tao::json::to_string(reply))}});
         hubTrigger->send();
     }

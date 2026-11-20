@@ -17,7 +17,7 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
 
     Decompressor decomp;
     ActiveMonitors monitors;
-    flat_hash_map<uint64_t, Bytes32> connIdToAuthedPubkey;
+    AuthedPubkeysByConn authedPubkeys;
     uint64_t currEventId = MAX_U64;
 
     while (1) {
@@ -31,13 +31,12 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
         for (auto &newMsg : newMsgs) {
             if (auto msg = std::get_if<MsgReqMonitor::NewSub>(&newMsg.msg)) {
                 auto connId = msg->sub.connId;
-                auto it = connIdToAuthedPubkey.find(connId);
-                Bytes32 connAuthedPubkey = it == connIdToAuthedPubkey.end() ? Bytes32() : it->second;
+                const auto &connAuthedPubkeys = authedPubkeys.get(connId);
 
                 env.foreach_Event(txn, [&](auto &ev){
                     PackedEventView packed(ev.buf);
                     if (msg->sub.filterGroup.doesMatch(packed)) {
-                        if (ReadRestrictor::shouldSendToSubscriber(packed, connAuthedPubkey)) {
+                        if (ReadRestrictor::shouldSendToSubscriber(packed, connAuthedPubkeys)) {
                             sendEvent(connId, msg->sub.subId, getEventJson(txn, decomp, ev.primaryKeyId));
                         }
                     }
@@ -50,23 +49,21 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
                 if (!monitors.addSub(txn, std::move(msg->sub), latestEventId)) {
                     sendNoticeError(connId, std::string("too many concurrent REQs"));
                 }
-            } else if (auto msg = std::get_if<MsgReqMonitor::SetAuth>(&newMsg.msg)) {
-                connIdToAuthedPubkey[msg->connId] = msg->authed;
+            } else if (auto msg = std::get_if<MsgReqMonitor::AddAuth>(&newMsg.msg)) {
+                authedPubkeys.add(msg->connId, msg->pubkey);
             } else if (auto msg = std::get_if<MsgReqMonitor::RemoveSub>(&newMsg.msg)) {
                 monitors.removeSub(msg->connId, msg->subId);
             } else if (auto msg = std::get_if<MsgReqMonitor::CloseConn>(&newMsg.msg)) {
-                connIdToAuthedPubkey.erase(msg->connId);
+                authedPubkeys.erase(msg->connId);
                 monitors.closeConn(msg->connId);
             } else if (std::get_if<MsgReqMonitor::DBChange>(&newMsg.msg)) {
                 env.foreach_Event(txn, [&](auto &ev){
                     monitors.process(txn, ev, [&](RecipientList &&recipients, uint64_t levId){
                         PackedEventView packed(ev.buf);
-                        if (ReadRestrictor::restrictedKinds().contains(packed.kind())) {
+                        if (ReadRestrictor::mayRestrict(packed.kind())) {
                             RecipientList filteredRecipients;
                             for (const auto &recipient : recipients) {
-                                auto it = connIdToAuthedPubkey.find(recipient.connId);
-                                Bytes32 authedPubkey = it == connIdToAuthedPubkey.end() ? Bytes32() : it->second;
-                                if (ReadRestrictor::shouldSendToSubscriber(packed, authedPubkey)) {
+                                if (ReadRestrictor::shouldSendToSubscriber(packed, authedPubkeys.get(recipient.connId))) {
                                     filteredRecipients.emplace_back(recipient);
                                 }
                             }

@@ -26,6 +26,12 @@ static void checkConfig() {
         }
     }
 
+    if (cfg().relay__auth__authorOnlyReads || cfg().relay__auth__authorOnlyWrites) {
+        if (!cfg().relay__auth__enabled || cfg().relay__auth__serviceUrl.empty()) {
+            LW << "relay.auth.authorOnlyReads/authorOnlyWrites need relay.auth.enabled and relay.auth.serviceUrl: until they are set, nobody can read or write";
+        }
+    }
+
     if (cfg().events__rejectEphemeralEventsOlderThanSeconds >= cfg().events__ephemeralEventsLifetimeSeconds) {
         LW << "rejectEphemeralEventsOlderThanSeconds is >= ephemeralEventsLifetimeSeconds, which could result in unnecessary disk activity";
     }

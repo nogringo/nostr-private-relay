@@ -19,10 +19,19 @@ config:
     desc: "Enable NIP-42 authentication"
     default: true
   - name: relay__auth__serviceUrl
-    desc: "External relay URL (beginning with wss://). Required in order to validate challenge responses."
+    desc: "External relay URL (beginning with wss://). Required in order to validate challenge responses, so private storage (authorOnlyReads/authorOnlyWrites) doesn't work without it."
     default: ""
+  - name: relay__auth__authorOnlyReads
+    desc: "NIP-37 private storage: REQ, COUNT and NEG-OPEN require NIP-42 AUTH, and only return events authored by an authenticated pubkey, or gift wraps (kinds 1059/21059) addressed to one. Overrides restrictedReadKinds."
+    default: true
+  - name: relay__auth__authorOnlyWrites
+    desc: "Only accept events authored by an authenticated pubkey, or gift wraps addressed to one. NIP-62 requests to vanish are accepted without AUTH."
+    default: true
+  - name: relay__auth__maxPubkeysPerConnection
+    desc: "Maximum number of pubkeys a single connection can AUTH as (NIP-42 allows several)"
+    default: 10
   - name: relay__auth__restrictedReadKinds
-    desc: "Comma-separated list of event kinds that require NIP-42 AUTH to read via REQ/COUNT/NEG-OPEN. Example for DMs: '4,1059'."
+    desc: "Comma-separated list of event kinds that require NIP-42 AUTH to read via REQ/COUNT/NEG-OPEN, when authorOnlyReads is false. Example for DMs: '4,1059'."
     default: "4, 1059"
   - name: relay__auth__restrictReadToInvolvedPubkey
     desc: "When a filter matches restrictedReadKinds, also require the authenticated pubkey to appear in its 'authors' or '#p' set."
@@ -30,10 +39,10 @@ config:
 
   - name: relay__info__name
     desc: "NIP-11: Name of this server. Short/descriptive (< 30 characters)"
-    default: "strfry default"
+    default: "nostr-private-relay"
   - name: relay__info__description
     desc: "NIP-11: Detailed information about relay, free-form"
-    default: "This is a strfry instance."
+    default: "Private storage relay (NIP-37) for your kind 10013 list: authenticate with NIP-42 and only you can read your events."
   - name: relay__info__pubkey
     desc: "NIP-11: Administrative nostr pubkey (in npub or 32-byte HEX format), for contact purposes"
     default: ""
@@ -61,7 +70,7 @@ config:
 
   - name: relay__maxWebsocketPayloadSize
     desc: "Maximum accepted incoming websocket frame size (should be larger than max event)"
-    default: 131072
+    default: 262144
     noReload: true
   - name: relay__maxReqFilterSize
     desc: "Maximum number of filters allowed in a REQ"
@@ -89,8 +98,8 @@ config:
     desc: "Maximum number of subscriptions (concurrent REQs) a connection can have open at any time"
     default: 200
   - name: relay__maxPendingOutboundBytes
-    desc: "Per-connection cap on unsent outbound bytes buffered inside the websocket library (0 = unlimited). Default 33554432 (32 MiB) aligns with worst-case outbound for one maximal filter under default maxFilterLimit * maxEventSize. Connections exceeding this are terminated to bound memory used by slow/stalled clients."
-    default: 33554432
+    desc: "Per-connection cap on unsent outbound bytes buffered inside the websocket library (0 = unlimited). Default 67108864 (64 MiB) aligns with worst-case outbound for one maximal filter under default maxFilterLimit * maxEventSize. Connections exceeding this are terminated to bound memory used by slow/stalled clients."
+    default: 67108864
 
   - name: relay__writePolicy__plugin
     desc: "If non-empty, path to an executable script that implements the writePolicy plugin logic"

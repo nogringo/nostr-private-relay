@@ -1,3 +1,45 @@
+# nostr-private-relay
+
+A private storage relay for the relay list of [NIP-37](https://github.com/nostr-protocol/nips/blob/master/37.md) (`kind:10013`): drafts, checkpoints, and any other private event you want kept on a relay that nobody else can read. It is a fork of [strfry](https://github.com/hoytech/strfry), and it serves many users, each one isolated from the others.
+
+* **Only you can read your events.** Every `REQ`, `COUNT` and `NEG-OPEN` needs [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) AUTH, and the relay narrows each filter down to the authenticated pubkeys before running it. A filter that only asks for other users' events is closed with `restricted:`. Live subscriptions and negentropy follow the same rule. This also hides from other users the metadata that encryption leaves visible: kinds, `d` tags, timestamps.
+* **Only you can write your events.** An event is accepted from its authenticated author, so nobody can fill your storage with copies of events they found elsewhere.
+* **Gift wraps belong to their recipient.** A `kind:1059` (or `21059`) is signed by a throwaway key, so it is owned by the pubkey in its `p` tag: the recipient stores it, reads it, and deletes it ([NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md)).
+* **Several accounts per connection.** A client can AUTH as several pubkeys on the same connection and see all their events, as NIP-42 requires.
+* **Efficient sync.** [NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md) negentropy, limited to your own events.
+* **Deletion that sticks.** [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletions by id or address, [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts), and [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) requests to vanish: a request naming this relay (or `ALL_RELAYS`) is accepted without AUTH, erases everything from the pubkey and every gift wrap addressed to it, and keeps the erased events from being published again.
+* **Room for any encrypted payload.** The default `events.maxEventSize` fits the largest NIP-44 ciphertext, so a long draft is never rejected for its size.
+* **Clients know what to expect.** The AUTH challenge is sent as soon as a client connects, `CLOSED`/`OK` messages use the machine-readable `auth-required:` and `restricted:` prefixes, and NIP-11 lists NIPs 37, 42, 62 and 77 with `auth_required` and `restricted_writes` set.
+
+### Setup
+
+Build and run it like strfry (see below), and set the public URL of the relay. Without it, AUTH can't be verified, so nobody can read or write:
+
+    relay {
+        auth {
+            serviceUrl = "wss://private.example.com"
+        }
+    }
+
+These options control private storage, all under `relay.auth`:
+
+| Option | Default | |
+| --- | --- | --- |
+| `authorOnlyReads` | `true` | Serve every event to its owner only |
+| `authorOnlyWrites` | `true` | Accept every event from its authenticated owner only |
+| `maxPubkeysPerConnection` | `10` | How many pubkeys one connection can AUTH as |
+
+Set `authorOnlyReads` and `authorOnlyWrites` to `false` to get the behaviour of a regular strfry relay.
+
+### Limits
+
+* This is not a DM inbox. Someone sending you a gift wrap can't AUTH as you, so the relay refuses it. Keep your `kind:10050` relays separate.
+* `strfry sync`, `strfry stream` and `strfry router` don't AUTH, so they can't read from or write to a relay in private mode over the network. Back up the server with `strfry export`.
+
+The rest of this document is strfry's own documentation.
+
+<hr>
+
 # strfry - a nostr relay
 
 ![strfry logo](docs/strfry.svg)
