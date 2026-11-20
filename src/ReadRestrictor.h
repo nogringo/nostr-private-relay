@@ -42,22 +42,26 @@ public:
     }
 
     // An event belongs to its author, except NIP-59 gift wraps: their signing key is thrown away,
-    // so they belong to the recipient in their p-tag (as for NIP-09 deletions and NIP-62 vanish).
+    // so a wrap belongs to the single recipient in its p-tag, never to its signer.
     // Returns a null Bytes32 when no authenticated pubkey owns the event
     static Bytes32 authedOwner(const PackedEventView &packed, const AuthedPubkeys &authed) {
-        if (authed.contains(packed.pubkey())) return Bytes32(packed.pubkey());
+        if (!isGiftWrapKind(packed.kind())) {
+            return authed.contains(packed.pubkey()) ? Bytes32(packed.pubkey()) : Bytes32();
+        }
 
-        Bytes32 owner;
-        if (!isGiftWrapKind(packed.kind())) return owner;
+        std::string_view recipient;
+        size_t numRecipients = 0;
 
         packed.foreachTag([&](char tagName, std::string_view tagVal) {
-            if (tagName == 'p' && authed.contains(tagVal)) {
-                owner = Bytes32(tagVal);
-                return false;
+            if (tagName == 'p') {
+                recipient = tagVal;
+                numRecipients++;
             }
             return true;
         });
-        return owner;
+
+        if (numRecipients != 1 || !authed.contains(recipient)) return Bytes32();
+        return Bytes32(recipient);
     }
 
     static bool isOwnedBy(const PackedEventView &packed, const AuthedPubkeys &authed) {

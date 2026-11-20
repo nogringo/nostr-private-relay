@@ -8,6 +8,9 @@ struct QueryScheduler : NonCopyable {
     std::function<void(lmdb::txn &txn, const Subscription &sub, const std::vector<uint64_t> &levIds)> onEventBatch;
     std::function<void(lmdb::txn &txn, Subscription &sub, uint64_t total)> onComplete;
 
+    // Events it rejects are neither passed to the callbacks above nor counted in onComplete's total
+    std::function<bool(lmdb::txn &txn, const Subscription &sub, uint64_t levId)> accept;
+
     // If false, then levIds returned to above callbacks can be stale (because they were deleted)
     // If false, then onEvent's eventPayload will always be ""
     bool ensureExists = true;
@@ -88,6 +91,11 @@ struct QueryScheduler : NonCopyable {
                 if (!eventPayloadCursor.get(key, eventPayload, MDB_SET_KEY)) return; // If not found, was deleted while scan was paused
             }
 
+            if (accept && !accept(txn, sub, levId)) {
+                q->numRejected++;
+                return;
+            }
+
             if (onEvent) onEvent(txn, sub, levId, eventPayload);
             if (onEventBatch) levIdBatch.push_back(levId);
         }, cfg().relay__queryTimesliceBudgetMicroseconds, cfg().relay__logging__dbScanPerf);
@@ -101,7 +109,7 @@ struct QueryScheduler : NonCopyable {
             auto connId = q->sub.connId;
             removeSub(connId, q->sub.subId);
 
-            if (onComplete) onComplete(txn, q->sub, q->sentEventsFull.size());
+            if (onComplete) onComplete(txn, q->sub, q->sentEventsFull.size() - q->numRejected);
 
             delete q;
         } else {

@@ -284,6 +284,12 @@ static std::optional<uint64_t> vanishedUntil(lmdb::txn &txn, std::optional<Decom
 }
 
 
+// NIP-59: in private storage a gift wrap belongs to its recipient only, so its signer can't delete it
+static bool signerCanDelete(uint64_t kind) {
+    return !cfg().relay__auth__authorOnlyWrites || (kind != 1059 && kind != 21059);
+}
+
+
 static bool isEventABeforeEventB(const PackedEventView &a, const PackedEventView &b) {
     // If timestamps are equal, then according to NIP-01, the one with the *greatest* lexical id is considered "earlier" (ie, discarded).
     return a.created_at() < b.created_at() || (a.created_at() == b.created_at() && a.id() > b.id());
@@ -319,13 +325,13 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
             }
 
             // NIP-62: a deletion request has no effect on a request to vanish
-            if (packed.kind() != 62 && env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(packed.pubkey()))) {
+            if (packed.kind() != 62 && signerCanDelete(packed.kind()) && env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(packed.pubkey()))) {
                 ev.status = EventWriteStatus::Deleted;
                 continue;
             }
 
             // NIP-62: what a request to vanish deleted can't be published again
-            if (isVanished(packed.pubkey(), packed.created_at())) {
+            if (signerCanDelete(packed.kind()) && isVanished(packed.pubkey(), packed.created_at())) {
                 ev.status = EventWriteStatus::Deleted;
                 continue;
             }
@@ -403,7 +409,8 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 env.generic_foreachFull(txn, env.dbi_Event__pubkey, makeKey_StringUint64(packed.pubkey(), 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
                     ParsedKey_StringUint64 parsedKey(k);
                     if (parsedKey.s != packed.pubkey() || parsedKey.n > packed.created_at()) return false;
-                    levIdsToDelete.push_back(lmdb::from_sv<uint64_t>(v));
+                    uint64_t levId = lmdb::from_sv<uint64_t>(v);
+                    if (signerCanDelete(PackedEventView(lookupEventByLevId(txn, levId).buf).kind())) levIdsToDelete.push_back(levId);
                     return true;
                 });
 
@@ -427,7 +434,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                         auto otherEv = lookupEventById(txn, tagVal);
                         if (otherEv) {
                             auto otherPacked = PackedEventView(otherEv->buf);
-                            bool canDelete = otherPacked.pubkey() == packed.pubkey() && otherPacked.kind() != 62;
+                            bool canDelete = otherPacked.pubkey() == packed.pubkey() && otherPacked.kind() != 62 && signerCanDelete(otherPacked.kind());
 
                             // NIP-59: gift wraps (kind 1059/21059) are signed by a random one-time-use
                             // key, so the recipient is never the author. Per NIP-59, relays SHOULD delete

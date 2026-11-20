@@ -256,6 +256,22 @@ async function testGiftWrapsBelongToTheirRecipient({ aliceConn, bobConn }) {
   expect(fromBob[2] === false, "only the recipient may store a gift wrap");
   await store(aliceConn, wrap);
 
+  const signedByBob = sign(bob, { kind: 1059, tags: [["p", alice.pub]], content: "sealed" });
+  const fromSigner = await publish(bobConn, signedByBob);
+  expect(
+    fromSigner[2] === false && fromSigner[3].startsWith("restricted:"),
+    "the signer of a gift wrap must not store it for its recipient",
+  );
+
+  const toBoth = sign(newUser(), { kind: 1059, tags: [["p", bob.pub], ["p", alice.pub]], content: "sealed" });
+  for (const conn of [bobConn, aliceConn]) {
+    const ok = await publish(conn, toBoth);
+    expect(
+      ok[2] === false && ok[3].startsWith("restricted:"),
+      "a gift wrap with several p tags has no owner and must be refused",
+    );
+  }
+
   const forAlice = await query(aliceConn, "wraps", { kinds: [1059], "#p": [alice.pub] });
   expect(sameIds(forAlice.events, new Set([wrap.id])), "the recipient must get their gift wrap");
 
@@ -277,6 +293,42 @@ async function testGiftWrapsBelongToTheirRecipient({ aliceConn, bobConn }) {
 
   pass("testGiftWrapsBelongToTheirRecipient");
   return wrap;
+}
+
+async function testSignerCantTouchAGiftWrap({ aliceConn }) {
+  // A sender who kept the throwaway key can AUTH as it
+  const signer = newUser();
+  const signerConn = await connect();
+  expect((await authAs(signerConn, signer))[2] === true, "the signer of a gift wrap should AUTH");
+
+  const wrap = sign(signer, { kind: 1059, tags: [["p", alice.pub]], content: "sealed", created_at: now() - 3600 });
+  const storedAfterVanish = sign(signer, { kind: 1059, tags: [["p", alice.pub]], content: "sealed", created_at: now() - 7200 });
+
+  await store(signerConn, sign(signer, { kind: 5, tags: [["e", wrap.id]], content: "before" }));
+  await store(aliceConn, wrap);
+  stored[alice.pub].add(wrap.id);
+
+  await store(signerConn, sign(signer, { kind: 5, tags: [["e", wrap.id]], content: "after" }));
+
+  signerConn.send(["COUNT", "signer-count", { authors: [signer.pub], kinds: [1059] }]);
+  const count = await signerConn.waitFor((m) => m[1] === "signer-count");
+  expect(
+    count[0] === "COUNT" && count[2].count === 0,
+    `the signer must not count a gift wrap, got ${JSON.stringify(count)}`,
+  );
+
+  await store(signerConn, sign(signer, { kind: 62, tags: [["relay", serviceUrl]] }));
+  await store(aliceConn, storedAfterVanish);
+  stored[alice.pub].add(storedAfterVanish.id);
+
+  const kept = await query(aliceConn, "signer-wraps", { kinds: [1059] });
+  expect(
+    sameIds(kept.events, new Set([wrap.id, storedAfterVanish.id])),
+    "the signer's deletions and request to vanish must not touch the recipient's gift wraps",
+  );
+
+  await signerConn.close();
+  pass("testSignerCantTouchAGiftWrap");
 }
 
 async function syncWithNegentropy(client, subId, filter) {
@@ -401,6 +453,7 @@ async function main() {
         await testSeveralPubkeysPerConnection();
         await testLiveEventsStayPrivate(conns);
         const deletedWrap = await testGiftWrapsBelongToTheirRecipient(conns);
+        await testSignerCantTouchAGiftWrap(conns);
         await testNegentropyOnlySyncsOwnEvents(conns);
         await testRequestToVanish(conns, deletedWrap);
       } finally {

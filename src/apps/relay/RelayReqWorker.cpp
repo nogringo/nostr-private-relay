@@ -8,14 +8,15 @@ void RelayServer::runReqWorker(ThreadPool<MsgReqWorker>::Thread &thr) {
     QueryScheduler queries;
     AuthedPubkeysByConn authedPubkeys;
 
+    queries.accept = [&](lmdb::txn &txn, const auto &sub, uint64_t levId){
+        // Without private storage, COUNT is checked per filter instead, by isFilterAllowedToCount
+        if (sub.countOnly && !ReadRestrictor::authorOnly()) return true;
+        auto ev = lookupEventByLevId(txn, levId);
+        return ReadRestrictor::shouldSendToSubscriber(PackedEventView(ev.buf), authedPubkeys.get(sub.connId));
+    };
+
     queries.onEvent = [&](lmdb::txn &txn, const auto &sub, uint64_t levId, std::string_view eventPayload){
         if (sub.countOnly) return;
-        auto ev = lookupEventByLevId(txn, levId);
-        PackedEventView packed(ev.buf);
-        if (!ReadRestrictor::shouldSendToSubscriber(packed, authedPubkeys.get(sub.connId))) {
-            return; 
-        }
-        
         sendEvent(sub.connId, sub.subId, decodeEventPayload(txn, decomp, eventPayload, nullptr, nullptr));
     };
 

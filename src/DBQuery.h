@@ -288,6 +288,7 @@ struct DBQuery : NonCopyable {
     bool dead = false; // external flag
     flat_hash_set<uint64_t> sentEventsFull;
     flat_hash_set<uint64_t> sentEventsCurr;
+    uint64_t numRejected = 0; // external counter
     uint64_t lastWorkChecked = 0;
 
     uint64_t currScanTime = 0;

@@ -197,7 +197,7 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
                     sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
                     sendOKResponse(connId, idHex, false, foundProtected ? "auth-required: event marked as protected" : "auth-required: this relay only stores events of authenticated users");
                 } else {
-                    sendOKResponse(connId, idHex, false, foundProtected ? "restricted: must be published by the author" : "restricted: this relay only stores events from their author, or gift wraps from their recipient");
+                    sendOKResponse(connId, idHex, false, foundProtected ? "restricted: must be published by the author" : "restricted: this relay only stores events from their author, or gift wraps with a single p tag from that recipient");
                 }
                 return;
             }
