@@ -3,6 +3,8 @@
 #include <iostream>
 #include <memory>
 #include <algorithm>
+#include <utility>
+#include <unistd.h>
 
 #include <hoytech/time.h>
 #include <hoytech/hex.h>
@@ -24,6 +26,30 @@
 
 
 
+
+// A compacted copy of the DB in an unlinked file, so the disk space comes back once fd is closed
+struct BackupFile {
+    int fd = -1;
+    uint64_t size = 0;
+    std::string filename;
+
+    BackupFile() = default;
+    BackupFile(BackupFile &&other) noexcept : fd(std::exchange(other.fd, -1)), size(other.size), filename(std::move(other.filename)) {}
+
+    BackupFile &operator=(BackupFile &&other) noexcept {
+        if (this != &other) {
+            if (fd >= 0) ::close(fd);
+            fd = std::exchange(other.fd, -1);
+            size = other.size;
+            filename = std::move(other.filename);
+        }
+        return *this;
+    }
+
+    ~BackupFile() {
+        if (fd >= 0) ::close(fd);
+    }
+};
 
 struct MsgWebsocket : NonCopyable {
     struct Send {
@@ -54,7 +80,16 @@ struct MsgWebsocket : NonCopyable {
         std::string ipAddr;
     };
 
-    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown, HttpReply, DropIp>;
+    struct OfferBackup {
+        std::string token;
+        BackupFile file;
+    };
+
+    struct ContinueBackup {
+        uint64_t requestId;
+    };
+
+    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown, HttpReply, DropIp, OfferBackup, ContinueBackup>;
     Var msg;
     MsgWebsocket(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -306,6 +341,17 @@ struct RelayServer {
 
     void dropConnectionsFromIp(std::string ipAddr) {
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::DropIp{std::move(ipAddr)}});
+        hubTrigger->send();
+    }
+
+    void offerBackup(std::string token, BackupFile &&file) {
+        tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::OfferBackup{std::move(token), std::move(file)}});
+        hubTrigger->send();
+    }
+
+    // Also called from the websocket thread, so a download never runs inside a uWS write callback
+    void continueBackup(uint64_t requestId) {
+        tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::ContinueBackup{requestId}});
         hubTrigger->send();
     }
 

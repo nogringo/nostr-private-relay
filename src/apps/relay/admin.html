@@ -401,7 +401,7 @@ dialog p { color: var(--muted); overflow-wrap: anywhere; }
   <section class="signin" id="signin">
     <h1>Manage this relay</h1>
     <p>Sign in with the Nostr extension that holds an admin key. Every change is signed by that key, so your extension may ask you to approve each one.</p>
-    <p>You never see what people store here: their events stay private, and this page only shows how much space each pubkey uses.</p>
+    <p>This page shows how much space each pubkey uses, never the events people store.</p>
     <button class="primary" id="sign-in" type="button">Sign in with extension</button>
     <div class="alert" id="signin-error" role="alert" hidden></div>
   </section>
@@ -450,6 +450,14 @@ dialog p { color: var(--muted); overflow-wrap: anywhere; }
         <p class="empty" id="users-empty" hidden>Nobody stores anything on this relay yet.</p>
       </div>
       <p class="note" id="users-note"></p>
+
+      <div class="panel stack">
+        <div class="lead">
+          <h3>Backup</h3>
+          <p class="note">Downloads a compacted copy of the database: every stored event, with the access lists, blocked IPs and relay info. Anyone who gets the file sees all of it, so keep it as safe as the server. To restore it, stop the relay and put the file in place of data.mdb in its db directory.</p>
+        </div>
+        <div><button class="primary" id="backup" type="button">Download backup</button></div>
+      </div>
 
       <form class="panel stack" id="erase-form">
         <div class="lead">
@@ -881,6 +889,22 @@ $("erase-form").addEventListener("submit", async (e) => {
   const form = e.currentTarget;
   const input = form.elements.pubkey.value.trim();
   if (await erase(form.querySelector("button"), input, null)) form.reset();
+});
+
+// The relay snapshots the DB before answering, so the browser download starts with its full size
+$("backup").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  button.textContent = "Preparing backup...";
+
+  await act(button, "Backup failed", async () => {
+    const token = await rpc("backup");
+    const link = h("a", { href: new URL(`admin/backup?token=${token}`, apiUrl).href, download: true, hidden: true });
+    document.body.append(link);
+    link.click();
+    link.remove();
+  });
+
+  button.textContent = "Download backup";
 });
 
 // Access

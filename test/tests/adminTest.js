@@ -1,10 +1,11 @@
 import os from "node:os";
 import path from "node:path";
+import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from "@nostr/tools";
 import { openWebSocket, WsClient } from "../utils/websocketClient.js";
-import { config, runRelaySuite, writeConfig } from "../utils/relay.js";
+import { cleanDb, config, runRelaySuite, runStrfry, writeConfig } from "../utils/relay.js";
 
 const workDir = path.join(os.tmpdir(), "strfry-tests");
 const dbDir = path.join(workDir, "admin-db");
@@ -149,7 +150,7 @@ async function testOnlyAdminsCanCall() {
   }
 
   const methods = await call("supportedmethods");
-  for (const m of ["banpubkey", "allowpubkey", "blockip", "changerelayname", "stats", "erasepubkey"]) {
+  for (const m of ["banpubkey", "allowpubkey", "blockip", "changerelayname", "stats", "erasepubkey", "backup"]) {
     expect(methods.includes(m), `supportedmethods must list ${m}`);
   }
 
@@ -274,6 +275,42 @@ async function testBlockedIps() {
   pass("testBlockedIps");
 }
 
+async function testBackup() {
+  const token = await call("backup");
+  expect(/^[0-9a-f]{64}$/.test(token), `backup must return a token, got ${token}`);
+
+  const res = await fetch(`${httpUrl}admin/backup?token=${token}`);
+  expect(res.status === 200, `the backup must download, got ${res.status}`);
+  expect(
+    /^attachment; filename="relay\.test-\d{8}-\d{6}\.mdb"$/.test(res.headers.get("content-disposition")),
+    `the backup must download as a file, got ${res.headers.get("content-disposition")}`,
+  );
+  const file = Buffer.from(await res.arrayBuffer());
+  expect(file.length > 0 && file.length === Number(res.headers.get("content-length")), "the backup must arrive whole");
+
+  const reused = await fetch(`${httpUrl}admin/backup?token=${token}`);
+  expect(reused.status === 404, `a backup link works once, got ${reused.status}`);
+  await reused.text();
+
+  const forged = await fetch(`${httpUrl}admin/backup?token=${"00".repeat(32)}`);
+  expect(forged.status === 404, `an unknown token must be refused, got ${forged.status}`);
+  await forged.text();
+
+  const restoreDir = path.join(workDir, "admin-restore-db");
+  const restoreCfg = path.join(workDir, "admin-restore.conf");
+  cleanDb(restoreDir);
+  writeFileSync(path.join(restoreDir, "data.mdb"), file);
+  writeConfig(config(restoreDir, port + 1), restoreCfg);
+
+  const exported = runStrfry(["--config", restoreCfg, "export"]);
+  expect(exported.status === 0, `the backup must open as a DB: ${exported.stderr}`);
+  const events = exported.stdout.trim().split("\n").map((line) => JSON.parse(line));
+  expect(events.filter((ev) => ev.pubkey === alice.pub).length === 3, "the backup must hold alice's events");
+  expect(events.some((ev) => ev.kind === 1059 && ev.tags.some((t) => t[0] === "p" && t[1] === alice.pub)), "the backup must hold the wrap addressed to alice");
+
+  pass("testBackup");
+}
+
 async function testErasePubkey() {
   const client = await connect();
   await authAs(client, alice);
@@ -323,6 +360,7 @@ async function main() {
       await testAllowList();
       await testRelayInfoOverrides();
       await testBlockedIps();
+      await testBackup();
       await testErasePubkey();
     },
   });

@@ -15,12 +15,13 @@ static std::string_view httpStatusLine(int status) {
         case 200: return "200 OK";
         case 204: return "204 No Content";
         case 401: return "401 Unauthorized";
+        case 404: return "404 Not Found";
         case 413: return "413 Payload Too Large";
         default: return "500 Internal Server Error";
     }
 }
 
-static std::string preGenerateHttpResponse(const std::string &contentType, const std::string &content, const std::string &extraHeaders = "", int status = 200) {
+static std::string httpHead(int status, const std::string &contentType, uint64_t contentLength, const std::string &extraHeaders = "") {
     std::string output = "HTTP/1.1 ";
     output += httpStatusLine(status);
     output += "\r\n";
@@ -28,12 +29,51 @@ static std::string preGenerateHttpResponse(const std::string &contentType, const
     output += "Access-Control-Allow-Origin: *\r\n";
     output += "Connection: keep-alive\r\n";
     output += "Server: strfry\r\n";
-    output += std::string("Content-Length: ") + std::to_string(content.size()) + "\r\n";
+    output += std::string("Content-Length: ") + std::to_string(contentLength) + "\r\n";
     output += extraHeaders;
     output += "\r\n";
-    output += content;
     return output;
+}
+
+static std::string preGenerateHttpResponse(const std::string &contentType, const std::string &content, const std::string &extraHeaders = "", int status = 200) {
+    return httpHead(status, contentType, content.size(), extraHeaders) + content;
 };
+
+static std::string_view queryParam(std::string_view url, std::string_view name) {
+    auto pos = url.find('?');
+    if (pos == std::string_view::npos) return "";
+
+    for (auto params = url.substr(pos + 1); params.size(); ) {
+        auto param = params.substr(0, params.find('&'));
+        if (param.size() > name.size() && param.starts_with(name) && param[name.size()] == '=') return param.substr(name.size() + 1);
+        if (param.size() == params.size()) break;
+        params.remove_prefix(param.size() + 1);
+    }
+
+    return "";
+}
+
+// A backup sent in chunks, each one written once the socket has drained the previous one
+struct BackupDownload {
+    RelayServer *server;
+    uint64_t requestId;
+    uWS::HttpResponse *res;
+    BackupFile file;
+    uint64_t offset = 0;
+    bool writing = false;
+    bool sentWhileWriting = false;
+};
+
+static void onBackupChunkSent(void *, void *data, bool cancelled, void *) {
+    if (cancelled) return; // the connection closed, and onCancelledHttpRequest frees the download
+
+    auto *download = static_cast<BackupDownload *>(data);
+    if (download->writing) download->sentWhileWriting = true;
+    else download->server->continueBackup(download->requestId);
+}
+
+static const uint64_t backupLinkLifetimeSeconds = 60;
+static const size_t backupChunkSize = 1 << 20;
 
 
 
@@ -76,6 +116,51 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     flat_hash_map<uint64_t, PendingRequest> pendingRequests;
     uint64_t nextRequestId = 1;
     const size_t maxRequestBodySize = 65536;
+
+    struct OfferedBackup {
+        BackupFile file;
+        uint64_t expiresAt;
+    };
+
+    flat_hash_map<std::string, OfferedBackup> offeredBackups; // by one-time token
+    flat_hash_map<uint64_t, std::unique_ptr<BackupDownload>> backupDownloads; // by requestId
+    std::string backupChunk;
+
+    std::function<void()> expireBackups = [&]{
+        auto now = hoytech::curr_time_s();
+        std::vector<std::string> expired;
+
+        for (const auto &[token, offer] : offeredBackups) {
+            if (offer.expiresAt <= now) expired.push_back(token);
+        }
+
+        for (const auto &token : expired) offeredBackups.erase(token);
+    };
+
+    auto pumpBackup = [&](BackupDownload &download){
+        while (download.offset < download.file.size) {
+            size_t length = std::min<uint64_t>(backupChunkSize, download.file.size - download.offset);
+            backupChunk.resize(length);
+            ssize_t n = ::pread(download.file.fd, backupChunk.data(), length, download.offset);
+
+            if (n <= 0) {
+                LE << "Backup download failed: " << (n < 0 ? strerror(errno) : "file is shorter than expected");
+                download.res->getHttpSocket()->terminate(); // runs onCancelledHttpRequest, which frees download
+                return;
+            }
+
+            download.offset += n;
+            download.writing = true;
+            download.sentWhileWriting = false;
+            download.res->write(backupChunk.data(), n, onBackupChunkSent, &download);
+            download.writing = false;
+
+            if (!download.sentWhileWriting) return;
+        }
+
+        LI << "Backup download complete: " << renderSize(download.file.size);
+        backupDownloads.erase(download.requestId);
+    };
 
     std::string tempBuf;
     tempBuf.reserve(cfg().events__maxEventSize + MAX_SUBID_SIZE + 100);
@@ -349,6 +434,30 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             res->write(nodeInfo.data(), nodeInfo.size());
         } else if (url == "/favicon.ico") {
             res->write(faviconResponse.data(), faviconResponse.size());
+        } else if (path == "/admin/backup" && method == uWS::METHOD_GET) {
+            expireBackups();
+            auto offer = offeredBackups.find(std::string(queryParam(url, "token")));
+
+            if (offer == offeredBackups.end()) {
+                auto response = preGenerateHttpResponse("text/plain; charset=utf-8", "This backup link has expired or was already used.\n", "Cache-Control: no-store\r\n", 404);
+                res->write(response.data(), response.size());
+                return;
+            }
+
+            uint64_t requestId = nextRequestId++;
+            res->setUserData((void*)(uintptr_t)requestId);
+
+            auto download = std::make_unique<BackupDownload>(BackupDownload{this, requestId, res, std::move(offer->second.file)});
+            offeredBackups.erase(offer);
+
+            auto head = httpHead(200, "application/octet-stream", download->file.size,
+                "Content-Disposition: attachment; filename=\"" + download->file.filename + "\"\r\n"
+                "Cache-Control: no-store\r\n");
+            res->write(head.data(), head.size());
+
+            LI << "Backup download started: " << renderSize(download->file.size);
+            backupDownloads.emplace(requestId, std::move(download));
+            continueBackup(requestId);
         } else if (path == "/admin") {
             res->write(adminPageResponse.data(), adminPageResponse.size());
         } else if (req.getHeader("accept").toStringView() == "application/nostr+json") {
@@ -369,7 +478,9 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     });
 
     hubGroup->onCancelledHttpRequest([&](uWS::HttpResponse *res){
-        pendingRequests.erase((uint64_t)(uintptr_t)res->getUserData());
+        auto requestId = (uint64_t)(uintptr_t)res->getUserData();
+        pendingRequests.erase(requestId);
+        backupDownloads.erase(requestId);
     });
 
     hubGroup->onConnection([&](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
@@ -555,6 +666,11 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                 for (auto *ws : blocked) ws->terminate();
 
                 if (blocked.size()) LI << "Dropped " << blocked.size() << " connections from blocked IP " << renderIP(msg->ipAddr);
+            } else if (auto msg = std::get_if<MsgWebsocket::OfferBackup>(&newMsg.msg)) {
+                offeredBackups[msg->token] = OfferedBackup{std::move(msg->file), hoytech::curr_time_s() + backupLinkLifetimeSeconds};
+            } else if (auto msg = std::get_if<MsgWebsocket::ContinueBackup>(&newMsg.msg)) {
+                auto it = backupDownloads.find(msg->requestId);
+                if (it != backupDownloads.end()) pumpBackup(*it->second);
             } else if (std::get_if<MsgWebsocket::GracefulShutdown>(&newMsg.msg)) {
                 LW << "Initiating graceful shutdown: " << connIdToConnection.size() << " connections remaining";
                 gracefulShutdown = true;
@@ -570,6 +686,13 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         auto *r = static_cast<std::function<void()> *>(a->getData());
         (*r)();
     });
+
+    // Frees the disk space of backups nobody downloaded
+    auto *backupExpiryTimer = new uS::Timer(hub.getLoop());
+    backupExpiryTimer->setData(&expireBackups);
+    backupExpiryTimer->start([](uS::Timer *t){
+        (*static_cast<std::function<void()> *>(t->getData()))();
+    }, 15'000, 15'000);
 
 
 

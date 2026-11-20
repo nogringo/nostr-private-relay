@@ -1,3 +1,8 @@
+#include <cstdlib>
+#include <ctime>
+#include <sys/stat.h>
+#include <openssl/rand.h>
+
 #include "RelayServer.h"
 #include "RelayUrl.h"
 #include "ReadRestrictor.h"
@@ -197,13 +202,53 @@ tao::json::value stats(lmdb::txn &txn, uint64_t startTime, uint64_t limit) {
     });
 }
 
+std::string backupFilename() {
+    std::string name;
+    for (char c : normalizeRelayUrl(cfg().relay__auth__serviceUrl)) name += isalnum((unsigned char)c) || c == '.' || c == '-' ? c : '_';
+
+    char date[32];
+    time_t now = ::time(nullptr);
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    strftime(date, sizeof(date), "-%Y%m%d-%H%M%S.mdb", &tm);
+
+    return name + date;
+}
+
+// Same compacted copy as `strfry compact`, consistent while the relay keeps writing
+BackupFile snapshotDb() {
+    std::string path = cfg().db;
+    if (path.empty() || path.back() != '/') path += '/';
+    path += ".backup-XXXXXX";
+
+    BackupFile file;
+    file.fd = ::mkstemp(path.data());
+    if (file.fd < 0) throw herr("unable to create a backup file in ", cfg().db, ": ", strerror(errno));
+    ::unlink(path.c_str());
+
+    env.copy_fd(file.fd);
+
+    struct stat st;
+    if (::fstat(file.fd, &st)) throw herr("unable to read the backup file size: ", strerror(errno));
+    file.size = st.st_size;
+    file.filename = backupFilename();
+
+    return file;
+}
+
+std::string randomToken() {
+    unsigned char buf[32];
+    if (RAND_bytes(buf, sizeof(buf)) != 1) throw herr("unable to generate a backup token");
+    return to_hex(std::string_view((char*)buf, sizeof(buf)));
+}
+
 const std::vector<std::string> supportedMethods = {
     "supportedmethods",
     "banpubkey", "unbanpubkey", "listbannedpubkeys",
     "allowpubkey", "unallowpubkey", "listallowedpubkeys",
     "blockip", "unblockip", "listblockedips",
     "changerelayname", "changerelaydescription", "changerelayicon",
-    "stats", "erasepubkey",
+    "stats", "erasepubkey", "backup",
 };
 
 }
@@ -298,6 +343,14 @@ static tao::json::value handleMethod(RelayServer &server, const std::string &met
         txn.commit();
 
         return deleted;
+    } else if (method == "backup") {
+        auto file = snapshotDb();
+        auto token = randomToken();
+
+        LI << "Backup of " << renderSize(file.size) << " ready for download";
+        server.offerBackup(token, std::move(file));
+
+        return token;
     }
 
     throw herr("unsupported method: ", method);
