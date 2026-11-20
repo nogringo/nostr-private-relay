@@ -75,6 +75,10 @@ static void onBackupChunkSent(void *, void *data, bool cancelled, void *) {
 static const uint64_t backupLinkLifetimeSeconds = 60;
 static const size_t backupChunkSize = 1 << 20;
 
+// An import token lasts this long after its last slice was imported
+static const uint64_t importTokenLifetimeSeconds = 60;
+static const size_t maxImportBodySize = 1 << 20;
+
 
 
 void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
@@ -106,11 +110,12 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     uint64_t nextConnectionId = 1;
     bool gracefulShutdown = false;
 
-    // NIP-86 requests, from their first byte until the admin thread replies
+    // NIP-86 requests and import slices, from their first byte until the admin thread replies
     struct PendingRequest {
         uWS::HttpResponse *res;
         std::string authorization;
         std::string body;
+        std::string importToken;
     };
 
     flat_hash_map<uint64_t, PendingRequest> pendingRequests;
@@ -126,15 +131,22 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     flat_hash_map<uint64_t, std::unique_ptr<BackupDownload>> backupDownloads; // by requestId
     std::string backupChunk;
 
-    std::function<void()> expireBackups = [&]{
+    flat_hash_map<std::string, uint64_t> importTokens; // expiry by token
+
+    std::function<void()> expireTokens = [&]{
         auto now = hoytech::curr_time_s();
-        std::vector<std::string> expired;
+        std::vector<std::string> expiredBackups, expiredImports;
 
         for (const auto &[token, offer] : offeredBackups) {
-            if (offer.expiresAt <= now) expired.push_back(token);
+            if (offer.expiresAt <= now) expiredBackups.push_back(token);
         }
 
-        for (const auto &token : expired) offeredBackups.erase(token);
+        for (const auto &[token, expiresAt] : importTokens) {
+            if (expiresAt <= now) expiredImports.push_back(token);
+        }
+
+        for (const auto &token : expiredBackups) offeredBackups.erase(token);
+        for (const auto &token : expiredImports) importTokens.erase(token);
     };
 
     auto pumpBackup = [&](BackupDownload &download){
@@ -374,7 +386,9 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
     auto dispatchAdminRequest = [&](uint64_t requestId){
         auto &pending = pendingRequests.at(requestId);
-        tpAdmin.dispatch(0, MsgAdmin{MsgAdmin::Request{requestId, std::move(pending.authorization), std::move(pending.body)}});
+
+        if (pending.importToken.size()) tpAdmin.dispatch(0, MsgAdmin{MsgAdmin::ImportLines{requestId, std::move(pending.body)}});
+        else tpAdmin.dispatch(0, MsgAdmin{MsgAdmin::Request{requestId, std::move(pending.authorization), std::move(pending.body)}});
     };
 
 
@@ -399,6 +413,34 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
         if (method == uWS::METHOD_OPTIONS) {
             res->write(corsPreflightResponse.data(), corsPreflightResponse.size());
+            return;
+        }
+
+        if (method == uWS::METHOD_POST && path == "/admin/import") {
+            uint64_t requestId = nextRequestId++;
+            res->setUserData((void*)(uintptr_t)requestId);
+
+            expireTokens();
+            std::string token(queryParam(url, "token"));
+
+            if (!importTokens.contains(token)) {
+                auto response = preGenerateHttpResponse("application/json", "{\"error\":\"this import link has expired\"}", "Cache-Control: no-store\r\n", 404);
+                res->write(response.data(), response.size());
+                return;
+            }
+
+            if (length + remainingBytes > maxImportBodySize) {
+                auto response = preGenerateHttpResponse("application/json", "{\"error\":\"request too large\"}", "", 413);
+                res->write(response.data(), response.size());
+                return;
+            }
+
+            auto &pending = pendingRequests[requestId];
+            pending.res = res;
+            pending.importToken = std::move(token);
+            if (length) pending.body.assign(data, length);
+
+            if (remainingBytes == 0) dispatchAdminRequest(requestId);
             return;
         }
 
@@ -435,7 +477,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         } else if (url == "/favicon.ico") {
             res->write(faviconResponse.data(), faviconResponse.size());
         } else if (path == "/admin/backup" && method == uWS::METHOD_GET) {
-            expireBackups();
+            expireTokens();
             auto offer = offeredBackups.find(std::string(queryParam(url, "token")));
 
             if (offer == offeredBackups.end()) {
@@ -651,8 +693,14 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                 auto it = pendingRequests.find(msg->requestId);
 
                 if (it != pendingRequests.end()) {
-                    auto response = preGenerateHttpResponse("application/nostr+json+rpc", msg->body, "", msg->status);
+                    const auto &importToken = it->second.importToken;
+                    auto response = preGenerateHttpResponse(importToken.size() ? "application/json" : "application/nostr+json+rpc", msg->body, "", msg->status);
                     it->second.res->write(response.data(), response.size());
+
+                    if (auto token = importTokens.find(importToken); token != importTokens.end()) {
+                        token->second = hoytech::curr_time_s() + importTokenLifetimeSeconds;
+                    }
+
                     pendingRequests.erase(it);
                 }
             } else if (auto msg = std::get_if<MsgWebsocket::DropIp>(&newMsg.msg)) {
@@ -671,6 +719,8 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             } else if (auto msg = std::get_if<MsgWebsocket::ContinueBackup>(&newMsg.msg)) {
                 auto it = backupDownloads.find(msg->requestId);
                 if (it != backupDownloads.end()) pumpBackup(*it->second);
+            } else if (auto msg = std::get_if<MsgWebsocket::OfferImport>(&newMsg.msg)) {
+                importTokens[msg->token] = hoytech::curr_time_s() + importTokenLifetimeSeconds;
             } else if (std::get_if<MsgWebsocket::GracefulShutdown>(&newMsg.msg)) {
                 LW << "Initiating graceful shutdown: " << connIdToConnection.size() << " connections remaining";
                 gracefulShutdown = true;
@@ -688,9 +738,9 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     });
 
     // Frees the disk space of backups nobody downloaded
-    auto *backupExpiryTimer = new uS::Timer(hub.getLoop());
-    backupExpiryTimer->setData(&expireBackups);
-    backupExpiryTimer->start([](uS::Timer *t){
+    auto *tokenExpiryTimer = new uS::Timer(hub.getLoop());
+    tokenExpiryTimer->setData(&expireTokens);
+    tokenExpiryTimer->start([](uS::Timer *t){
         (*static_cast<std::function<void()> *>(t->getData()))();
     }, 15'000, 15'000);
 

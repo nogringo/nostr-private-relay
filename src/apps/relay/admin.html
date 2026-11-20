@@ -307,6 +307,9 @@ td .key {
 
 .note { color: var(--muted); font-size: 14px; }
 
+.problems { margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.problems:empty { display: none; }
+
 .empty { color: var(--muted); padding: 18px 0 4px; }
 
 .inline-form {
@@ -457,6 +460,21 @@ dialog p { color: var(--muted); overflow-wrap: anywhere; }
           <p class="note">Downloads a compacted copy of the database: every stored event, with the access lists, blocked IPs and relay info. Anyone who gets the file sees all of it, so keep it as safe as the server. To restore it, stop the relay and put the file in place of data.mdb in its db directory.</p>
         </div>
         <div><button class="primary" id="backup" type="button">Download backup</button></div>
+      </div>
+
+      <div class="panel stack">
+        <div class="lead">
+          <h3>Import events</h3>
+          <p class="note">Adds the events of a JSONL file, one event per line, such as the output of strfry export. The relay checks every signature, skips the events it already has, and refuses the events of pubkeys that can't store anything here: banned pubkeys, or pubkeys off the allow list while it is on. Deletion requests and requests to vanish in the file apply as if they were published.</p>
+        </div>
+        <div>
+          <button class="primary" id="import" type="button">Import JSONL file</button>
+          <input type="file" id="import-file" hidden>
+        </div>
+        <div class="lead" id="import-result" role="status" hidden>
+          <p id="import-status"></p>
+          <ul class="problems" id="import-problems"></ul>
+        </div>
       </div>
 
       <form class="panel stack" id="erase-form">
@@ -905,6 +923,84 @@ $("backup").addEventListener("click", async (e) => {
   });
 
   button.textContent = "Download backup";
+});
+
+// Under nginx's default client_max_body_size of 1 MB
+const importSliceSize = 512 * 1024;
+const importCounters = ["lines", "added", "skipped", "refused", "invalid"];
+
+// One signature for the token, then the file goes in slices cut after a newline
+async function importFile(file, totals, onSlice) {
+  const url = new URL(`admin/import?token=${await rpc("import")}`, apiUrl).href;
+
+  for (let start = 0; start < file.size; ) {
+    let bytes = new Uint8Array(await file.slice(start, start + importSliceSize).arrayBuffer());
+
+    if (start === 0 && bytes.find((b) => b > 32) !== 0x7b) throw new Error(`${file.name} doesn't start with a JSON object, so it isn't a JSONL file of events.`);
+
+    const newline = bytes.lastIndexOf(10);
+    if (start + bytes.length < file.size && newline >= 0) bytes = bytes.subarray(0, newline + 1);
+
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/x-ndjson" }, body: bytes });
+    const reply = await res.json().catch(() => ({}));
+    if (!res.ok || !reply.result) throw new Error(reply.error || `The relay answered with HTTP ${res.status}.`);
+
+    for (const problem of reply.result.errors) {
+      if (totals.errors.length < 5) totals.errors.push({ line: totals.lines + problem.line, error: problem.error });
+    }
+    for (const key of importCounters) totals[key] += reply.result[key];
+
+    start += bytes.length;
+    onSlice(start);
+  }
+}
+
+function importSummary(totals) {
+  const parts = [`${plural(totals.added, "event", "events")} added`];
+  if (totals.skipped) parts.push(`${numbers.format(totals.skipped)} already stored, outdated or deleted`);
+  if (totals.refused) parts.push(`${numbers.format(totals.refused)} refused`);
+  if (totals.invalid) parts.push(plural(totals.invalid, "invalid line", "invalid lines"));
+  return parts.join(", ");
+}
+
+$("import").addEventListener("click", () => $("import-file").click());
+
+$("import-file").addEventListener("change", async (e) => {
+  const file = e.currentTarget.files[0];
+  e.currentTarget.value = "";
+  if (!file) return;
+
+  const button = $("import");
+  const status = $("import-status");
+  const totals = { errors: [], ...Object.fromEntries(importCounters.map((key) => [key, 0])) };
+  let sent = 0;
+  const percent = () => Math.floor((sent / file.size) * 100);
+
+  button.textContent = "Importing...";
+  status.textContent = `Importing ${file.name}`;
+  $("import-problems").replaceChildren();
+  $("import-result").hidden = false;
+
+  const done = await act(button, "Import failed", () => importFile(file, totals, (bytes) => {
+    sent = bytes;
+    status.textContent = `Importing ${file.name}: ${percent()}%, ${plural(totals.added, "event", "events")} added so far`;
+  }));
+
+  status.textContent = done
+    ? `${file.name}: ${importSummary(totals)}.`
+    : `Stopped at ${percent()}% of ${file.name}: ${importSummary(totals)}.`;
+
+  const problems = totals.errors.map((problem) => h("li", {}, `Line ${numbers.format(problem.line)}: ${problem.error}`));
+  const more = totals.refused + totals.invalid - problems.length;
+  if (more > 0) problems.push(h("li", {}, `and ${plural(more, "other line", "other lines")}`));
+  $("import-problems").replaceChildren(...problems);
+
+  button.textContent = "Import JSONL file";
+
+  if (totals.added) {
+    state.loaded.delete("storage");
+    if (currentTab() === "storage") await loadStats();
+  }
 });
 
 // Access

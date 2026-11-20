@@ -150,7 +150,7 @@ async function testOnlyAdminsCanCall() {
   }
 
   const methods = await call("supportedmethods");
-  for (const m of ["banpubkey", "allowpubkey", "blockip", "changerelayname", "stats", "erasepubkey", "backup"]) {
+  for (const m of ["banpubkey", "allowpubkey", "blockip", "changerelayname", "stats", "erasepubkey", "backup", "import"]) {
     expect(methods.includes(m), `supportedmethods must list ${m}`);
   }
 
@@ -330,6 +330,60 @@ async function testErasePubkey() {
   pass("testErasePubkey");
 }
 
+async function postImport(token, body) {
+  const res = await fetch(`${httpUrl}admin/import?token=${token}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-ndjson" },
+    body,
+  });
+  return { status: res.status, ...(await res.json()) };
+}
+
+async function testImport() {
+  const dave = newUser();
+  const eve = newUser();
+  await call("banpubkey", [eve.pub]);
+
+  const notes = [0, 1, 2].map((i) => sign(dave, { content: `dave ${i}`, created_at: now() - 400 * 86400 + i }));
+  const wrap = sign(newUser(), { kind: 1059, tags: [["p", dave.pub]], content: "wrapped" });
+  const forged = { ...sign(dave, { content: "signed" }), content: "tampered" };
+  const firstSlice = notes.map((ev) => JSON.stringify(ev) + "\n").join("") + "\n";
+  const secondSlice = [wrap, sign(eve, { content: "banned" }), forged].map((ev) => JSON.stringify(ev)).join("\n") + "\nnot json";
+
+  const token = await call("import");
+  expect(/^[0-9a-f]{64}$/.test(token), `import must return a token, got ${token}`);
+
+  const first = await postImport(token, firstSlice);
+  expect(first.status === 200 && first.result.lines === 4 && first.result.added === 3, `old events must import: ${JSON.stringify(first)}`);
+
+  const second = (await postImport(token, secondSlice)).result;
+  expect(second.lines === 4 && second.added === 1, `the wrap must import: ${JSON.stringify(second)}`);
+  expect(second.refused === 1 && second.errors.some((e) => e.line === 2 && e.error.includes("banned")), "a banned pubkey's event must be refused");
+  expect(second.invalid === 2 && second.errors.some((e) => e.line === 3 && e.error.includes("bad event id")), "a tampered event must be invalid");
+
+  const again = (await postImport(token, firstSlice)).result;
+  expect(again.added === 0 && again.skipped === 3, `events already stored must be skipped: ${JSON.stringify(again)}`);
+
+  const client = await connect();
+  await authAs(client, dave);
+  let stored = await query(client, "imported", {});
+  expect(stored.length === 4 && stored.some((ev) => ev.id === wrap.id), `dave must read his imported events and wrap, got ${stored.length}`);
+
+  const deletion = sign(dave, { kind: 5, tags: [["e", wrap.id]] });
+  expect((await postImport(token, JSON.stringify(deletion))).result.added === 1, "a deletion request must import");
+  stored = await query(client, "after-deletion", {});
+  expect(!stored.some((ev) => ev.id === wrap.id), "an imported deletion from the recipient must delete the wrap");
+  await client.close();
+
+  const unknown = await postImport("00".repeat(32), firstSlice);
+  expect(unknown.status === 404, `an unknown import token must be refused, got ${unknown.status}`);
+
+  const tooLarge = await postImport(token, "x".repeat((1 << 20) + 1));
+  expect(tooLarge.status === 413, `a slice over 1 MiB must be refused, got ${tooLarge.status}`);
+
+  pass("testImport");
+}
+
 async function main() {
   console.log("* relay management (NIP-86) integration tests");
 
@@ -362,6 +416,7 @@ async function main() {
       await testBlockedIps();
       await testBackup();
       await testErasePubkey();
+      await testImport();
     },
   });
 

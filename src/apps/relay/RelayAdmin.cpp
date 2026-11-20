@@ -238,8 +238,96 @@ BackupFile snapshotDb() {
 
 std::string randomToken() {
     unsigned char buf[32];
-    if (RAND_bytes(buf, sizeof(buf)) != 1) throw herr("unable to generate a backup token");
+    if (RAND_bytes(buf, sizeof(buf)) != 1) throw herr("unable to generate a token");
     return to_hex(std::string_view((char*)buf, sizeof(buf)));
+}
+
+// Stores the events of these JSONL lines under the same access lists as publishing them
+tao::json::value importLines(secp256k1_context *secpCtx, std::string_view body) {
+    const size_t maxErrors = 5;
+
+    std::vector<EventToWrite> events;
+    uint64_t lines = 0, refused = 0, invalid = 0;
+    tao::json::value errors = tao::json::empty_array;
+
+    auto addError = [&](std::string_view error){
+        if (errors.get_array().size() < maxErrors) errors.push_back(tao::json::value({ { "line", lines }, { "error", std::string(error) } }));
+    };
+
+    {
+        auto txn = env.txn_ro();
+
+        while (body.size()) {
+            auto end = body.find('\n');
+            auto line = body.substr(0, end);
+            body.remove_prefix(end == std::string_view::npos ? body.size() : end + 1);
+            lines++;
+
+            if (line.find_first_not_of(" \t\r") == std::string_view::npos) continue;
+
+            std::string packedStr, jsonStr;
+            bool isVanishRequest = false;
+
+            try {
+                auto json = tao::json::from_string(line);
+                parseAndVerifyEvent(json, secpCtx, true, false, packedStr, jsonStr);
+                isVanishRequest = isVanishRequestForThisRelay(json);
+            } catch (std::exception &e) {
+                invalid++;
+                addError(e.what());
+                continue;
+            }
+
+            PackedEventView packed(packedStr);
+            auto owner = ReadRestrictor::ownerOf(packed);
+            std::string refusal;
+
+            if (owner.empty() && cfg().relay__auth__authorOnlyWrites) refusal = "this relay only stores gift wraps with a single p tag";
+            else if (!isVanishRequest) refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
+
+            if (refusal.size()) {
+                refused++;
+                addError(refusal);
+                continue;
+            }
+
+            events.emplace_back(std::move(packedStr), std::move(jsonStr));
+        }
+    }
+
+    uint64_t added = 0;
+
+    if (events.size()) {
+        auto txn = env.txn_rw();
+        NegentropyFilterCache neFilterCache;
+        writeEvents(txn, neFilterCache, events);
+        txn.commit();
+
+        for (const auto &ev : events) {
+            if (ev.status == EventWriteStatus::Written) added++;
+        }
+    }
+
+    uint64_t skipped = events.size() - added;
+    LI << "Import of " << lines << " lines: " << added << " added, " << skipped << " skipped, " << refused << " refused, " << invalid << " invalid";
+
+    return tao::json::value({
+        { "lines", lines },
+        { "added", added },
+        { "skipped", skipped },
+        { "refused", refused },
+        { "invalid", invalid },
+        { "errors", std::move(errors) },
+    });
+}
+
+std::string importReply(secp256k1_context *secpCtx, std::string_view body) {
+    try {
+        return tao::json::to_string(tao::json::value({ { "result", importLines(secpCtx, body) } }));
+    } catch (std::exception &e) {
+        LE << "Import failed: " << e.what();
+        return tao::json::to_string(tao::json::value({ { "result", tao::json::null }, { "error", e.what() } }));
+    }
 }
 
 const std::vector<std::string> supportedMethods = {
@@ -248,7 +336,7 @@ const std::vector<std::string> supportedMethods = {
     "allowpubkey", "unallowpubkey", "listallowedpubkeys",
     "blockip", "unblockip", "listblockedips",
     "changerelayname", "changerelaydescription", "changerelayicon",
-    "stats", "erasepubkey", "backup",
+    "stats", "erasepubkey", "backup", "import",
 };
 
 }
@@ -351,6 +439,10 @@ static tao::json::value handleMethod(RelayServer &server, const std::string &met
         server.offerBackup(token, std::move(file));
 
         return token;
+    } else if (method == "import") {
+        auto token = randomToken();
+        server.offerImport(token);
+        return token;
     }
 
     throw herr("unsupported method: ", method);
@@ -364,6 +456,11 @@ void RelayServer::runAdmin(ThreadPool<MsgAdmin>::Thread &thr) {
         auto newMsgs = thr.inbox.pop_all();
 
         for (auto &newMsg : newMsgs) {
+            if (auto lines = std::get_if<MsgAdmin::ImportLines>(&newMsg.msg)) {
+                sendHttpReply(lines->requestId, 200, importReply(secpCtx, lines->body));
+                continue;
+            }
+
             auto &req = std::get<MsgAdmin::Request>(newMsg.msg);
 
             int status = 200;

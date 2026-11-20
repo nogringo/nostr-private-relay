@@ -10,7 +10,7 @@ A private storage relay for the relay list of [NIP-37](https://github.com/nostr-
 * **Deletion that sticks.** [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletions by id or address, [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts), and [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) requests to vanish: a request naming this relay (or `ALL_RELAYS`) is accepted without AUTH, erases everything from the pubkey and every gift wrap addressed to it, and keeps the erased events from being published again.
 * **Room for any encrypted payload.** The default `events.maxEventSize` fits the largest NIP-44 ciphertext, so a long draft is never rejected for its size.
 * **Clients know what to expect.** The AUTH challenge is sent as soon as a client connects, `CLOSED`/`OK` messages use the machine-readable `auth-required:` and `restricted:` prefixes, and NIP-11 lists NIPs 37, 42, 62 and 77 with `auth_required` and `restricted_writes` set.
-* **An admin page.** [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) management and a `/admin` page show how much space each pubkey uses, ban or allow pubkeys, block IPs, erase a pubkey's data, edit the relay info and download a backup. The page shows sizes and counts, never what is stored, but a backup holds every event: only list admins you would trust with the server.
+* **An admin page.** [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) management and a `/admin` page show how much space each pubkey uses, ban or allow pubkeys, block IPs, erase a pubkey's data, edit the relay info, download a backup and import events from a JSONL file. The page shows sizes and counts, never what is stored, but a backup holds every event: only list admins you would trust with the server.
 
 ### Setup
 
@@ -53,10 +53,13 @@ The page talks to the relay through [NIP-86](https://github.com/nostr-protocol/n
 | `stats` | `[limit?]` | Events, storage, users and connections, with the `limit` pubkeys (100 by default) using the most storage. A gift wrap counts for its recipient. It reads the whole DB. |
 | `erasepubkey` | `[pubkey]` | Deletes everything a request to vanish would: the events the pubkey signed and the gift wraps addressed to it. Returns how many were deleted. |
 | `backup` | `[]` | Makes a compacted copy of the DB, like `strfry compact`, and returns a token. `GET /admin/backup?token=<token>` downloads it, once, within 60 seconds. |
+| `import` | `[]` | Returns a token for `POST /admin/import?token=<token>`, whose body is JSONL lines, up to 1 MiB per request. Each request answers `{"result": {"lines", "added", "skipped", "refused", "invalid", "errors"}}`, where `errors` gives up to 5 line numbers with their reason. The token lasts until 60 seconds after its last request. |
 
 Pubkeys can be given in hex or as an npub. These lists and settings are stored in the DB, so every strfry process using it applies them, and they survive restarts.
 
 A backup is the whole LMDB file: the events, the lists above and the relay info. The copy is made while the relay keeps running, in a temporary file next to `data.mdb` that takes disk space until it is downloaded or its 60 seconds are up. To restore it, stop strfry, put the file in place of `data.mdb` in the `db` directory, and start strfry again. It needs a strfry with the same DB version (see [DB Compaction](#db-compaction)). `strfry export` can also read the events from it.
+
+An import checks every signature but not the timestamps, so old events go in. It follows the access lists: it refuses the events of banned pubkeys, or of pubkeys off the allow list while it is on, and in private mode the gift wraps without a single `p` tag. Deletion requests and requests to vanish in the file apply. The admin page sends the file in 512 KiB slices cut after a newline, which fits nginx's default `client_max_body_size`. `strfry import` reads the same files from the command line, without the access lists.
 
 ### Limits
 

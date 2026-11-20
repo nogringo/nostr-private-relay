@@ -89,7 +89,11 @@ struct MsgWebsocket : NonCopyable {
         uint64_t requestId;
     };
 
-    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown, HttpReply, DropIp, OfferBackup, ContinueBackup>;
+    struct OfferImport {
+        std::string token;
+    };
+
+    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown, HttpReply, DropIp, OfferBackup, ContinueBackup, OfferImport>;
     Var msg;
     MsgWebsocket(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -223,7 +227,13 @@ struct MsgAdmin : NonCopyable {
         std::string body;
     };
 
-    using Var = std::variant<Request>;
+    // JSONL lines posted with an import token, which the websocket thread already checked
+    struct ImportLines {
+        uint64_t requestId;
+        std::string body;
+    };
+
+    using Var = std::variant<Request, ImportLines>;
     Var msg;
     MsgAdmin(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -346,6 +356,11 @@ struct RelayServer {
 
     void offerBackup(std::string token, BackupFile &&file) {
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::OfferBackup{std::move(token), std::move(file)}});
+        hubTrigger->send();
+    }
+
+    void offerImport(std::string token) {
+        tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::OfferImport{std::move(token)}});
         hubTrigger->send();
     }
 
