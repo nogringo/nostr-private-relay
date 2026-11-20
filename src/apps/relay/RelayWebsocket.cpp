@@ -5,11 +5,25 @@
 #include "Favicon.h"
 #include "Bech32Utils.h"
 #include "PrometheusMetrics.h"
+#include "AccessControl.h"
+#include "AdminPage.h"
 
 
 
-static std::string preGenerateHttpResponse(const std::string &contentType, const std::string &content, const std::string &extraHeaders = "") {
-    std::string output = "HTTP/1.1 200 OK\r\n";
+static std::string_view httpStatusLine(int status) {
+    switch (status) {
+        case 200: return "200 OK";
+        case 204: return "204 No Content";
+        case 401: return "401 Unauthorized";
+        case 413: return "413 Payload Too Large";
+        default: return "500 Internal Server Error";
+    }
+}
+
+static std::string preGenerateHttpResponse(const std::string &contentType, const std::string &content, const std::string &extraHeaders = "", int status = 200) {
+    std::string output = "HTTP/1.1 ";
+    output += httpStatusLine(status);
+    output += "\r\n";
     output += std::string("Content-Type: ") + contentType + "\r\n";
     output += "Access-Control-Allow-Origin: *\r\n";
     output += "Connection: keep-alive\r\n";
@@ -51,7 +65,17 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     flat_hash_map<uint64_t, Connection*> connIdToConnection;
     uint64_t nextConnectionId = 1;
     bool gracefulShutdown = false;
-    uint64_t serverStart = ::time(nullptr);
+
+    // NIP-86 requests, from their first byte until the admin thread replies
+    struct PendingRequest {
+        uWS::HttpResponse *res;
+        std::string authorization;
+        std::string body;
+    };
+
+    flat_hash_map<uint64_t, PendingRequest> pendingRequests;
+    uint64_t nextRequestId = 1;
+    const size_t maxRequestBodySize = 65536;
 
     std::string tempBuf;
     tempBuf.reserve(cfg().events__maxEventSize + MAX_SUBID_SIZE + 100);
@@ -62,6 +86,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
         if (cfg().relay__auth__enabled && cfg().relay__auth__serviceUrl.size() > 0) output.push_back(42);
         if (cfg().relay__auth__authorOnlyReads) output.push_back(37);
+        if (AccessControl::adminPubkeys().size()) output.push_back(86);
         if (cfg().relay__maxFilterLimitCount > 0) output.push_back(45);
         if (cfg().relay__negentropy__enabled) output.push_back(77);
 
@@ -80,8 +105,32 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         return output;
     };
 
-    auto getServerInfoHttpResponse = [&supportedNips, ver = uint64_t(0), rendered = std::string("")]() mutable {
-        if (ver != cfg().version()) {
+    struct RelayInfo {
+        std::string name;
+        std::string description;
+        std::string icon;
+        bool allowList = false;
+
+        bool operator==(const RelayInfo &) const = default;
+    };
+
+    auto loadRelayInfo = []{
+        auto txn = env.txn_ro();
+
+        return RelayInfo{
+            AccessControl::relaySetting(txn, "name", cfg().relay__info__name),
+            AccessControl::relaySetting(txn, "description", cfg().relay__info__description),
+            AccessControl::relaySetting(txn, "icon", cfg().relay__info__icon),
+            AccessControl::hasAllowList(txn),
+        };
+    };
+
+    auto getServerInfoHttpResponse = [&supportedNips, &loadRelayInfo, ver = uint64_t(0), info = RelayInfo(), rendered = std::string("")]() mutable {
+        auto currInfo = loadRelayInfo();
+
+        if (ver != cfg().version() || currInfo != info) {
+            info = std::move(currInfo);
+
             auto maybeNpub = [](std::string_view sv){
                 if (sv.starts_with("npub1")) {
                     return to_hex(decodeBech32Simple(sv));
@@ -101,15 +150,15 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                     { "max_limit", cfg().relay__maxFilterLimit },
                     { "max_event_tags", cfg().events__maxNumTags },
                     { "auth_required", cfg().relay__auth__authorOnlyReads && cfg().relay__auth__authorOnlyWrites },
-                    { "restricted_writes", cfg().relay__auth__authorOnlyWrites || cfg().relay__writePolicy__plugin.size() > 0 },
+                    { "restricted_writes", cfg().relay__auth__authorOnlyWrites || cfg().relay__writePolicy__plugin.size() > 0 || info.allowList },
                 }) },
             });
 
-            if (cfg().relay__info__name.size()) nip11["name"] = cfg().relay__info__name;
-            if (cfg().relay__info__description.size()) nip11["description"] = cfg().relay__info__description;
+            if (info.name.size()) nip11["name"] = info.name;
+            if (info.description.size()) nip11["description"] = info.description;
             if (cfg().relay__info__contact.size()) nip11["contact"] = cfg().relay__info__contact;
             if (cfg().relay__info__pubkey.size()) nip11["pubkey"] = maybeNpub(cfg().relay__info__pubkey);
-            if (cfg().relay__info__icon.size()) nip11["icon"] = cfg().relay__info__icon;
+            if (info.icon.size()) nip11["icon"] = info.icon;
             if (cfg().relay__info__banner.size()) nip11["banner"] = cfg().relay__info__banner;
             if (cfg().relay__info__self.size()) nip11["self"] = maybeNpub(cfg().relay__info__self);
             if (cfg().relay__info__privacy.size()) nip11["privacy_policy"] = cfg().relay__info__privacy;
@@ -122,8 +171,12 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         return std::string_view(rendered); // memory only valid until next call
     };
 
-    auto getLandingPageHttpResponse = [&supportedNips, &serverStart, ver = uint64_t(0), lastUpdate = uint64_t(0), rendered = std::string("")]() mutable {
-        if (ver != cfg().version() || (uint64_t)::time(nullptr) - lastUpdate > 3600) {
+    auto getLandingPageHttpResponse = [this, &supportedNips, &loadRelayInfo, ver = uint64_t(0), info = RelayInfo(), lastUpdate = uint64_t(0), rendered = std::string("")]() mutable {
+        auto currInfo = loadRelayInfo();
+
+        if (ver != cfg().version() || currInfo != info || (uint64_t)::time(nullptr) - lastUpdate > 3600) {
+            info = std::move(currInfo);
+
             auto maybeUrl = [](std::string_view inp){
                 if (inp.starts_with("http://") || inp.starts_with("https://")) {
                     std::string output = "<a href=\"";
@@ -153,7 +206,10 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                 std::function<std::string(std::string_view)> maybeUrl;
                 std::function<std::string(std::string_view)> maybeNpub;
                 uint64_t uptime;
-            } ctx = { tao::json::to_string(supportedNips()), APP_GIT_VERSION, negentropy::PROTOCOL_VERSION - 0x60, maybeUrl, maybeNpub, (uint64_t)::time(nullptr) - serverStart };
+                std::string name;
+                std::string description;
+                std::string icon;
+            } ctx = { tao::json::to_string(supportedNips()), APP_GIT_VERSION, negentropy::PROTOCOL_VERSION - 0x60, maybeUrl, maybeNpub, (uint64_t)::time(nullptr) - startTime, info.name, info.description, info.icon };
 
             rendered = preGenerateHttpResponse("text/html", ::strfrytmpl::landing(ctx).str);
             ver = cfg().version();
@@ -219,6 +275,23 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
     std::string faviconResponse = preGenerateHttpResponse("image/x-icon", favicon(), "Cache-Control: public, max-age=31536000\r\n");
 
+    std::string adminPageResponse = preGenerateHttpResponse("text/html; charset=utf-8", adminPageHtml,
+        "Cache-Control: no-store\r\n"
+        "Content-Security-Policy: frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "Referrer-Policy: no-referrer\r\n");
+
+    // NIP-86 clients in a browser send Authorization and Content-Type, which need a CORS preflight
+    std::string corsPreflightResponse = preGenerateHttpResponse("text/plain", "",
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Authorization, Content-Type, Accept\r\n"
+        "Access-Control-Max-Age: 86400\r\n", 204);
+
+    auto dispatchAdminRequest = [&](uint64_t requestId){
+        auto &pending = pendingRequests.at(requestId);
+        tpAdmin.dispatch(0, MsgAdmin{MsgAdmin::Request{requestId, std::move(pending.authorization), std::move(pending.body)}});
+    };
+
 
     {
         int extensionOptions = 0;
@@ -236,6 +309,33 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
         std::string host = req.getHeader("host").toString();
         std::string url = req.getUrl().toString();
+        std::string_view path = std::string_view(url).substr(0, url.find('?'));
+        auto method = req.getMethod();
+
+        if (method == uWS::METHOD_OPTIONS) {
+            res->write(corsPreflightResponse.data(), corsPreflightResponse.size());
+            return;
+        }
+
+        if (method == uWS::METHOD_POST && req.getHeader("content-type").toStringView().starts_with("application/nostr+json+rpc")) {
+            uint64_t requestId = nextRequestId++;
+            res->setUserData((void*)(uintptr_t)requestId);
+
+            if (length + remainingBytes > maxRequestBodySize) {
+                auto response = preGenerateHttpResponse("application/nostr+json+rpc", "{\"error\":\"request too large\"}", "", 413);
+                res->write(response.data(), response.size());
+                return;
+            }
+
+            auto authorization = req.getHeader("authorization");
+            auto &pending = pendingRequests[requestId];
+            pending.res = res;
+            if (authorization) pending.authorization = authorization.toString();
+            if (length) pending.body.assign(data, length);
+
+            if (remainingBytes == 0) dispatchAdminRequest(requestId);
+            return;
+        }
 
         if (url == "/metrics") {
             auto metrics = PrometheusMetrics::getInstance().render();
@@ -249,6 +349,8 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             res->write(nodeInfo.data(), nodeInfo.size());
         } else if (url == "/favicon.ico") {
             res->write(faviconResponse.data(), faviconResponse.size());
+        } else if (path == "/admin") {
+            res->write(adminPageResponse.data(), adminPageResponse.size());
         } else if (req.getHeader("accept").toStringView() == "application/nostr+json") {
             auto info = getServerInfoHttpResponse();
             res->write(info.data(), info.size());
@@ -256,6 +358,18 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             auto landing = getLandingPageHttpResponse();
             res->write(landing.data(), landing.size());
         }
+    });
+
+    hubGroup->onHttpData([&](uWS::HttpResponse *res, char *data, size_t length, size_t remainingBytes){
+        auto it = pendingRequests.find((uint64_t)(uintptr_t)res->getUserData());
+        if (it == pendingRequests.end()) return;
+
+        it->second.body.append(data, length);
+        if (remainingBytes == 0) dispatchAdminRequest(it->first);
+    });
+
+    hubGroup->onCancelledHttpRequest([&](uWS::HttpResponse *res){
+        pendingRequests.erase((uint64_t)(uintptr_t)res->getUserData());
     });
 
     hubGroup->onConnection([&](uWS::WebSocket<uWS::SERVER> *ws, uWS::HttpRequest req) {
@@ -291,6 +405,18 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             if (setsockopt(ws->getFd(), SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval))) {
                 LW << "Failed to enable TCP keepalive: " << strerror(errno);
             }
+        }
+
+        bool blocked;
+        {
+            auto txn = env.txn_ro();
+            blocked = AccessControl::isIpBlocked(txn, c->ipAddr);
+        }
+
+        if (blocked) {
+            LI << "[" << connId << "] Blocked IP " << renderIP(c->ipAddr) << ", closing";
+            // close() runs onDisconnection right away, which deletes c
+            ws->close(1008, "blocked", 7);
         }
     });
 
@@ -410,6 +536,25 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                     memcpy(p + 10, subIdSv.data(), subIdSv.size());
                     doSend(item.connId, std::string_view(p, 13 + subIdSv.size() + msg->evJson.size()), uWS::OpCode::TEXT);
                 }
+            } else if (auto msg = std::get_if<MsgWebsocket::HttpReply>(&newMsg.msg)) {
+                auto it = pendingRequests.find(msg->requestId);
+
+                if (it != pendingRequests.end()) {
+                    auto response = preGenerateHttpResponse("application/nostr+json+rpc", msg->body, "", msg->status);
+                    it->second.res->write(response.data(), response.size());
+                    pendingRequests.erase(it);
+                }
+            } else if (auto msg = std::get_if<MsgWebsocket::DropIp>(&newMsg.msg)) {
+                std::vector<uWS::WebSocket<uWS::SERVER>*> blocked;
+
+                for (auto &[connId, c] : connIdToConnection) {
+                    if (c->ipAddr == msg->ipAddr) blocked.push_back(c->websocket);
+                }
+
+                // terminate() runs onDisconnection, which erases from connIdToConnection
+                for (auto *ws : blocked) ws->terminate();
+
+                if (blocked.size()) LI << "Dropped " << blocked.size() << " connections from blocked IP " << renderIP(msg->ipAddr);
             } else if (std::get_if<MsgWebsocket::GracefulShutdown>(&newMsg.msg)) {
                 LW << "Initiating graceful shutdown: " << connIdToConnection.size() << " connections remaining";
                 gracefulShutdown = true;

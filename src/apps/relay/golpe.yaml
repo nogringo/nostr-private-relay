@@ -37,6 +37,10 @@ config:
     desc: "When a filter matches restrictedReadKinds, also require the authenticated pubkey to appear in its 'authors' or '#p' set."
     default: true
 
+  - name: relay__admin__pubkeys
+    desc: "NIP-86 relay management: comma-separated pubkeys (npub or hex) allowed to use the management API and the /admin page"
+    default: ""
+
   - name: relay__info__name
     desc: "NIP-11: Name of this server. Short/descriptive (< 30 characters)"
     default: "nostr-private-relay"

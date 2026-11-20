@@ -4,6 +4,7 @@
 #include <docopt.h>
 
 #include "RelayServer.h"
+#include "AccessControl.h"
 
 
 static const char USAGE[] =
@@ -30,6 +31,18 @@ static void checkConfig() {
         if (!cfg().relay__auth__enabled || cfg().relay__auth__serviceUrl.empty()) {
             LW << "relay.auth.authorOnlyReads/authorOnlyWrites need relay.auth.enabled and relay.auth.serviceUrl: until they are set, nobody can read or write";
         }
+    }
+
+    for (auto item : AccessControl::splitList(cfg().relay__admin__pubkeys)) {
+        try {
+            AccessControl::parsePubkey(item);
+        } catch (std::exception &e) {
+            LW << "Ignoring relay.admin.pubkeys entry: " << e.what();
+        }
+    }
+
+    if (AccessControl::adminPubkeys().size() && cfg().relay__auth__serviceUrl.empty()) {
+        LW << "relay.admin.pubkeys needs relay.auth.serviceUrl: until it is set, the management API refuses every request";
     }
 
     if (cfg().events__rejectEphemeralEventsOlderThanSeconds >= cfg().events__ephemeralEventsLifetimeSeconds) {
@@ -76,6 +89,10 @@ void RelayServer::run() {
 
     tpNegentropy.init("Negentropy", cfg().relay__numThreads__negentropy, [this](auto &thr){
         runNegentropy(thr);
+    });
+
+    tpAdmin.init("Admin", 1, [this](auto &thr){
+        runAdmin(thr);
     });
 
     cronThread = std::thread([this]{

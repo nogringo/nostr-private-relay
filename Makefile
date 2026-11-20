@@ -28,7 +28,10 @@ INCS += -Iexternal/negentropy/cpp
 build/StrfryTemplates.h: $(shell find src/tmpls/ -type f -name '*.tmpl')
 	PERL5LIB=golpe/vendor/ perl golpe/external/templar/templar.pl src/tmpls/ strfrytmpl $@
 
-src/apps/relay/RelayWebsocket.o: build/StrfryTemplates.h
+build/AdminPage.h: src/apps/relay/admin.html
+	perl -0777 -ne 'print "#pragma once\n\nstatic const char adminPageHtml[] = R\"AdminPage($$_)AdminPage\";\n"' $< > $@
+
+src/apps/relay/RelayWebsocket.o: build/StrfryTemplates.h build/AdminPage.h
 
 .PHONY: test-subid
 test-subid: build/subid_tests

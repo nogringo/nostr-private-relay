@@ -44,7 +44,17 @@ struct MsgWebsocket : NonCopyable {
     struct GracefulShutdown {
     };
 
-    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown>;
+    struct HttpReply {
+        uint64_t requestId;
+        int status;
+        std::string body;
+    };
+
+    struct DropIp {
+        std::string ipAddr;
+    };
+
+    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown, HttpReply, DropIp>;
     Var msg;
     MsgWebsocket(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -170,6 +180,19 @@ struct MsgNegentropy : NonCopyable {
     MsgNegentropy(Var &&msg_) : msg(std::move(msg_)) {}
 };
 
+struct MsgAdmin : NonCopyable {
+    // NIP-86 request, with its NIP-98 Authorization header
+    struct Request {
+        uint64_t requestId;
+        std::string authorization;
+        std::string body;
+    };
+
+    using Var = std::variant<Request>;
+    Var msg;
+    MsgAdmin(Var &&msg_) : msg(std::move(msg_)) {}
+};
+
 struct RelayServerCtx {
     secp256k1_context *secpCtx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
     FilterValidator filterValidator;
@@ -179,6 +202,7 @@ struct RelayServerCtx {
 
 struct RelayServer {
     uS::Async *hubTrigger = nullptr;
+    uint64_t startTime = ::time(nullptr);
 
     // Thread Pools
 
@@ -188,6 +212,7 @@ struct RelayServer {
     ThreadPool<MsgReqWorker> tpReqWorker;
     ThreadPool<MsgReqMonitor> tpReqMonitor;
     ThreadPool<MsgNegentropy> tpNegentropy;
+    ThreadPool<MsgAdmin> tpAdmin;
     std::thread cronThread;
     std::thread signalHandlerThread;
 
@@ -200,7 +225,7 @@ struct RelayServer {
     void ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, std::string ipAddr, const tao::json::value &origJson, std::vector<MsgWriter> &output);
     void ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &arr, bool countOnly, std::string &outSubIdStr);
     void ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const tao::json::value &arr);
-    void ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson);
+    void ingesterProcessAuth(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson);
     std::string ingesterChallenge(RelayServerCtx &rsctx, uint64_t connId);
     void ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &origJson);
 
@@ -211,6 +236,8 @@ struct RelayServer {
     void runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr);
 
     void runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr);
+
+    void runAdmin(ThreadPool<MsgAdmin>::Thread &thr);
 
     void runCron();
 
@@ -269,6 +296,16 @@ struct RelayServer {
         PROM_INC_RELAY_MSG("OK");
         auto reply = tao::json::value::array({ "OK", eventIdHex, written, message });
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::Send{connId, std::move(tao::json::to_string(reply))}});
+        hubTrigger->send();
+    }
+
+    void sendHttpReply(uint64_t requestId, int status, std::string &&body) {
+        tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::HttpReply{requestId, status, std::move(body)}});
+        hubTrigger->send();
+    }
+
+    void dropConnectionsFromIp(std::string ipAddr) {
+        tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::DropIp{std::move(ipAddr)}});
         hubTrigger->send();
     }
 

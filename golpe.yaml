@@ -101,6 +101,37 @@ tables:
       - name: filter
         type: string
 
+  ## NIP-86: a pubkey is either allowed (status 1) or banned (status 2)
+  PubkeyAccess:
+    fields:
+      - name: pubkey
+        type: ubytes
+        index:
+          unique: true
+      - name: status
+        index: true
+      - name: reason
+        type: string
+
+  BlockedIp:
+    fields:
+      - name: ip
+        type: ubytes
+        index:
+          unique: true
+      - name: reason
+        type: string
+
+  ## NIP-86: relay info set by an admin, which overrides relay.info in the config
+  RelaySetting:
+    fields:
+      - name: name
+        type: string
+        index:
+          unique: true
+      - name: value
+        type: string
+
 tablesRaw:
   ## Raw nostr event JSON, possibly compressed
   ## keys are levIds

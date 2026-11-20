@@ -1,0 +1,1113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Relay admin</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #EDF0F3;
+  --surface: #FFFFFF;
+  --ink: #18212C;
+  --muted: #5A6675;
+  --line: #D5DBE2;
+  --brass: #8E6F22;
+  --brass-ink: #FFFFFF;
+  --brass-soft: #F4ECD6;
+  --danger: #B3261E;
+  --danger-soft: #FBE9E7;
+  --ok: #2F6B4F;
+  --ok-soft: #E3F1E9;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141C25;
+    --surface: #1C2733;
+    --ink: #E4E9EF;
+    --muted: #97A5B5;
+    --line: #2D3B4A;
+    --brass: #D9B867;
+    --brass-ink: #141C25;
+    --brass-soft: #3A3221;
+    --danger: #F2A49C;
+    --danger-soft: #46211E;
+    --ok: #8BD0AE;
+    --ok-soft: #1D3A2D;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+[hidden] { display: none !important; }
+
+h1, h2, h3 { margin: 0; line-height: 1.25; }
+h1 { font-size: 28px; font-weight: 650; letter-spacing: -0.01em; }
+h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.005em; }
+h3 { font-size: 16px; font-weight: 600; }
+p { margin: 0; }
+
+code, .key {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+a { color: var(--brass); }
+
+button, input, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+button {
+  cursor: pointer;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 7px 14px;
+  font-weight: 550;
+}
+
+button:hover { border-color: var(--muted); }
+button:disabled { cursor: progress; opacity: 0.55; }
+
+button.primary {
+  background: var(--brass);
+  border-color: var(--brass);
+  color: var(--brass-ink);
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+}
+
+button.quiet {
+  border-color: transparent;
+  background: transparent;
+  padding: 4px 8px;
+  color: var(--muted);
+}
+
+button.quiet:hover { color: var(--ink); background: var(--bg); }
+button.quiet.danger-text:hover { color: var(--danger); background: var(--danger-soft); }
+
+input, textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+input:focus, textarea:focus { border-color: var(--brass); outline: none; box-shadow: 0 0 0 3px var(--brass-soft); }
+
+label { display: block; font-weight: 550; }
+label > input, label > textarea { margin-top: 6px; font-weight: 400; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 650;
+  min-width: 0;
+}
+
+.brand img, .brand svg { width: 26px; height: 26px; flex: none; border-radius: 6px; }
+.brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.who code {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+}
+
+main {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+.signin {
+  max-width: 460px;
+  margin: 10vh auto 0;
+  display: grid;
+  gap: 16px;
+}
+
+.signin p { color: var(--muted); }
+.signin button { justify-self: start; }
+
+nav {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 28px;
+  overflow-x: auto;
+}
+
+nav button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: 10px 14px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+nav button[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--brass);
+}
+
+.alert {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.signin .alert { margin: 0; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 22px 24px;
+}
+
+/* minmax(0, ...) lets long keys and the table shrink instead of widening the page */
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+
+.lead { display: grid; gap: 8px; }
+.facts { color: var(--muted); }
+
+.mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-weight: 550;
+}
+
+.mode.closed { background: var(--brass-soft); color: var(--brass); }
+
+.storage-bar {
+  display: flex;
+  gap: 2px;
+  height: 34px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.storage-bar span {
+  min-width: 3px;
+  background: var(--brass);
+  transition: filter 120ms;
+}
+
+.storage-bar span.rest { background: var(--line); }
+.storage-bar span.banned {
+  background: repeating-linear-gradient(135deg, var(--danger) 0 5px, var(--danger-soft) 5px 9px);
+}
+.storage-bar span.hl { filter: brightness(1.25) saturate(1.2); }
+
+.table-wrap { overflow-x: auto; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+
+th { color: var(--muted); font-weight: 550; font-size: 13px; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+tbody tr.hl td { background: var(--brass-soft); }
+
+td .key {
+  display: block;
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+}
+
+.row-actions { display: flex; justify-content: flex-end; gap: 2px; white-space: nowrap; }
+.row-actions button { min-width: 64px; }
+
+.badge {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.badge.banned { background: var(--danger-soft); color: var(--danger); }
+.badge.allowed { background: var(--ok-soft); color: var(--ok); }
+
+.note { color: var(--muted); font-size: 14px; }
+
+.empty { color: var(--muted); padding: 18px 0 4px; }
+
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.inline-form.single { grid-template-columns: minmax(0, 1fr) auto; }
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
+}
+
+.list { list-style: none; margin: 0; padding: 0; }
+
+.list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.list li:last-child { border-bottom: 0; }
+.list .item { min-width: 0; }
+.list .item .key { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
+.list .reason { color: var(--muted); font-size: 14px; }
+
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+
+.info-form { display: grid; gap: 18px; max-width: 620px; }
+.icon-preview { display: flex; align-items: center; gap: 12px; }
+.icon-preview img { width: 48px; height: 48px; border-radius: 10px; object-fit: cover; background: var(--bg); }
+
+dialog {
+  width: min(460px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 24px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+dialog::backdrop { background: rgb(10 16 24 / 0.45); }
+dialog form { display: grid; gap: 16px; }
+dialog p { color: var(--muted); overflow-wrap: anywhere; }
+/* The confirm button comes first in the DOM, so Enter in the reason field confirms */
+.dialog-actions { display: flex; flex-direction: row-reverse; justify-content: flex-start; gap: 8px; }
+
+@media (max-width: 760px) {
+  .bar { padding: 12px 16px; }
+  main { padding: 24px 16px 48px; }
+  .columns { grid-template-columns: minmax(0, 1fr); }
+  .inline-form { grid-template-columns: 1fr; }
+  .inline-form button { justify-self: start; }
+  .hide-narrow { display: none; }
+  .who code { display: none; }
+  .who button { white-space: nowrap; }
+  td .key { max-width: 14ch; }
+  .panel { padding: 18px 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <svg id="mark" viewBox="0 0 26 26" aria-hidden="true">
+      <rect width="26" height="26" rx="6" fill="var(--brass)"/>
+      <circle cx="13" cy="10.5" r="3.6" fill="var(--brass-ink)"/>
+      <path d="M11.2 12.5h3.6l1.1 7.5h-5.8z" fill="var(--brass-ink)"/>
+    </svg>
+    <img id="relay-icon" alt="" hidden>
+    <span id="relay-name">Relay admin</span>
+  </div>
+  <div class="who" id="who" hidden>
+    <code id="who-key"></code>
+    <button class="quiet" id="sign-out" type="button">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <section class="signin" id="signin">
+    <h1>Manage this relay</h1>
+    <p>Sign in with the Nostr extension that holds an admin key. Every change is signed by that key, so your extension may ask you to approve each one.</p>
+    <p>You never see what people store here: their events stay private, and this page only shows how much space each pubkey uses.</p>
+    <button class="primary" id="sign-in" type="button">Sign in with extension</button>
+    <div class="alert" id="signin-error" role="alert" hidden></div>
+  </section>
+
+  <div id="app" hidden>
+    <nav role="tablist" aria-label="Relay admin">
+      <button role="tab" type="button" data-tab="storage" aria-selected="true">Storage</button>
+      <button role="tab" type="button" data-tab="access" aria-selected="false">Access</button>
+      <button role="tab" type="button" data-tab="ips" aria-selected="false">IP blocks</button>
+      <button role="tab" type="button" data-tab="info" aria-selected="false">Relay info</button>
+    </nav>
+
+    <div class="alert" id="error" role="alert" hidden>
+      <span id="error-text"></span>
+      <button class="quiet" id="error-dismiss" type="button">Dismiss</button>
+    </div>
+
+    <section class="stack" id="tab-storage" role="tabpanel">
+      <div class="lead">
+        <h2 id="summary">Loading storage</h2>
+        <p class="facts" id="facts"></p>
+      </div>
+      <p class="mode" id="mode" hidden></p>
+      <div class="storage-bar" id="storage-bar" aria-hidden="true"></div>
+
+      <div class="panel">
+        <div class="section-head">
+          <h3>Pubkeys by storage</h3>
+          <button class="quiet" id="refresh-storage" type="button">Refresh</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Pubkey</th>
+                <th class="num">Events</th>
+                <th class="num">Size</th>
+                <th class="num hide-narrow">Share</th>
+                <th class="num hide-narrow">Last event</th>
+                <th><span hidden>Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="users"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="users-empty" hidden>Nobody stores anything on this relay yet.</p>
+      </div>
+      <p class="note" id="users-note"></p>
+
+      <form class="panel stack" id="erase-form">
+        <div class="lead">
+          <h3>Erase a pubkey's data</h3>
+          <p class="note">Deletes every event the pubkey signed and every gift wrap addressed to it. It can still store new events unless you ban it.</p>
+        </div>
+        <div class="inline-form single">
+          <label>Pubkey <input name="pubkey" placeholder="npub1... or hex" autocomplete="off" spellcheck="false" required></label>
+          <button class="danger" type="submit">Erase data</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="stack" id="tab-access" role="tabpanel" hidden>
+      <div class="lead">
+        <div class="section-head">
+          <h2>Who can use this relay</h2>
+          <button class="quiet" id="refresh-access" type="button">Refresh</button>
+        </div>
+        <p class="facts">While the allow list is empty, any pubkey can sign in and store events. Add one pubkey and only allowed pubkeys and admins can. Banned pubkeys can't sign in or store anything, and a ban takes effect on open connections too.</p>
+      </div>
+
+      <div class="columns">
+        <div class="panel stack">
+          <h3>Allowed pubkeys</h3>
+          <form class="stack" id="allow-form">
+            <label>Pubkey <input name="pubkey" placeholder="npub1... or hex" autocomplete="off" spellcheck="false" required></label>
+            <div class="inline-form single">
+              <label>Reason <input name="reason" placeholder="Optional" autocomplete="off"></label>
+              <button class="primary" type="submit">Allow</button>
+            </div>
+          </form>
+          <ul class="list" id="allowed"></ul>
+        </div>
+
+        <div class="panel stack">
+          <h3>Banned pubkeys</h3>
+          <form class="stack" id="ban-form">
+            <label>Pubkey <input name="pubkey" placeholder="npub1... or hex" autocomplete="off" spellcheck="false" required></label>
+            <div class="inline-form single">
+              <label>Reason <input name="reason" placeholder="Optional" autocomplete="off"></label>
+              <button class="danger" type="submit">Ban</button>
+            </div>
+          </form>
+          <ul class="list" id="banned"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="stack" id="tab-ips" role="tabpanel" hidden>
+      <div class="lead">
+        <h2>Blocked IP addresses</h2>
+        <p class="facts">A blocked address can't open a connection, and its open connections close right away. Behind a reverse proxy, this needs relay.realIpHeader in strfry.conf.</p>
+      </div>
+      <div class="panel stack">
+        <form class="inline-form" id="ip-form">
+          <label>IP address <input name="ip" placeholder="203.0.113.7 or 2001:db8::7" autocomplete="off" spellcheck="false" required></label>
+          <label>Reason <input name="reason" placeholder="Optional" autocomplete="off"></label>
+          <button class="danger" type="submit">Block IP</button>
+        </form>
+        <ul class="list" id="ips"></ul>
+      </div>
+    </section>
+
+    <section class="stack" id="tab-info" role="tabpanel" hidden>
+      <div class="lead">
+        <h2>Relay info</h2>
+        <p class="facts">What clients read in the relay's NIP-11 document and on its home page. Clear a field to go back to the value in strfry.conf.</p>
+      </div>
+      <form class="panel info-form" id="info-form">
+        <label>Name <input name="name" autocomplete="off"></label>
+        <label>Description <textarea name="description" rows="3"></textarea></label>
+        <div class="icon-preview">
+          <img id="icon-preview" alt="" hidden>
+          <label style="flex: 1">Icon URL <input name="icon" type="url" placeholder="https://..." autocomplete="off"></label>
+        </div>
+        <div><button class="primary" id="info-save" type="submit">Save relay info</button></div>
+      </form>
+    </section>
+  </div>
+</main>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h3 id="confirm-title"></h3>
+    <p id="confirm-text"></p>
+    <label id="confirm-reason">Reason <input name="reason" placeholder="Optional" autocomplete="off"></label>
+    <div class="dialog-actions">
+      <button type="submit" value="ok" id="confirm-ok"></button>
+      <button type="submit" value="cancel" id="confirm-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+
+const apiUrl = new URL(".", location.href).href;
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  pubkey: null,
+  loaded: new Set(),
+  info: null,
+};
+
+function h(tag, props = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") el.className = value;
+    else if (key.startsWith("on")) el.addEventListener(key.slice(2), value);
+    else if (value === true) el.setAttribute(key, "");
+    else if (value !== false && value != null) el.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child != null && child !== false) el.append(child);
+  }
+  return el;
+}
+
+// NIP-19 npub encoding (bech32)
+const BECH32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+function polymod(values) {
+  const gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= gen[i];
+  }
+  return chk;
+}
+
+function npub(hex) {
+  const words = [];
+  let acc = 0;
+  let bits = 0;
+  for (const byte of hex.match(/../g).map((b) => parseInt(b, 16))) {
+    acc = ((acc << 8) | byte) & 0xfff;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      words.push((acc >> bits) & 31);
+    }
+  }
+  if (bits) words.push((acc << (5 - bits)) & 31);
+  const codes = [..."npub"].map((c) => c.charCodeAt(0));
+  const hrp = [...codes.map((c) => c >> 5), 0, ...codes.map((c) => c & 31)];
+  const mod = polymod([...hrp, ...words, 0, 0, 0, 0, 0, 0]) ^ 1;
+  const checksum = [0, 1, 2, 3, 4, 5].map((i) => (mod >> (5 * (5 - i))) & 31);
+  return "npub1" + [...words, ...checksum].map((w) => BECH32[w]).join("");
+}
+
+// What the admin typed may already be an npub
+function displayKey(key) {
+  return /^[0-9a-f]{64}$/i.test(key) ? npub(key.toLowerCase()) : key;
+}
+
+const numbers = new Intl.NumberFormat();
+const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+
+function size(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return `${i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${units[i]}`;
+}
+
+function ago(ts) {
+  const diff = Math.round(ts - Date.now() / 1000);
+  const steps = [["year", 31536000], ["month", 2592000], ["week", 604800], ["day", 86400], ["hour", 3600], ["minute", 60]];
+  for (const [unit, secs] of steps) {
+    if (Math.abs(diff) >= secs) return relative.format(Math.round(diff / secs), unit);
+  }
+  return relative.format(0, "second");
+}
+
+function duration(secs) {
+  if (secs >= 86400) return `${Math.floor(secs / 86400)} d ${Math.floor((secs % 86400) / 3600)} h`;
+  if (secs >= 3600) return `${Math.floor(secs / 3600)} h ${Math.floor((secs % 3600) / 60)} min`;
+  return `${Math.max(1, Math.floor(secs / 60))} min`;
+}
+
+function plural(n, one, many) {
+  return `${numbers.format(n)} ${n === 1 ? one : many}`;
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function base64(text) {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+}
+
+// NIP-86 call, authorized by a NIP-98 event that the extension signs
+async function rpc(method, params = []) {
+  const body = JSON.stringify({ method, params });
+  const event = await window.nostr.signEvent({
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["u", apiUrl], ["method", "POST"], ["payload", await sha256Hex(body)]],
+    content: "",
+  });
+
+  const res = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/nostr+json+rpc",
+      Authorization: `Nostr ${base64(JSON.stringify(event))}`,
+    },
+    body,
+  });
+
+  let reply;
+  try {
+    reply = await res.json();
+  } catch {
+    throw Object.assign(new Error(`The relay answered with HTTP ${res.status}.`), { status: res.status });
+  }
+
+  if (res.status === 401 || reply.error) {
+    throw Object.assign(new Error(reply.error || "The relay refused the request."), { status: res.status });
+  }
+
+  return reply.result;
+}
+
+function showError(err, context) {
+  $("error-text").textContent = context ? `${context}: ${err.message}` : err.message;
+  $("error").hidden = false;
+}
+
+$("error-dismiss").addEventListener("click", () => {
+  $("error").hidden = true;
+});
+
+// Runs an action with its button disabled, and reports a failure in the error banner
+async function act(button, context, fn) {
+  if (button) button.disabled = true;
+  try {
+    await fn();
+    $("error").hidden = true;
+    return true;
+  } catch (err) {
+    showError(err, context);
+    return false;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function confirmDialog({ title, text, ok, danger = false, reason = false }) {
+  const dialog = $("confirm");
+  $("confirm-title").textContent = title;
+  $("confirm-text").textContent = text;
+  $("confirm-ok").textContent = ok;
+  $("confirm-ok").className = danger ? "danger" : "primary";
+  $("confirm-reason").hidden = !reason;
+  dialog.querySelector("input").value = "";
+
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue === "ok" ? { reason: dialog.querySelector("input").value.trim() } : null);
+    }, { once: true });
+    dialog.returnValue = "";
+    dialog.showModal();
+    (reason ? dialog.querySelector("input") : $("confirm-cancel")).focus();
+  });
+}
+
+function keyCell(hex) {
+  const value = npub(hex);
+  return h("code", { class: "key", title: value }, value);
+}
+
+// Storage
+
+function renderStats(stats) {
+  $("summary").textContent = `${plural(stats.users, "pubkey stores", "pubkeys store")} ${plural(stats.events, "event", "events")}, ${size(stats.storage)}`;
+  $("facts").textContent = `Database file ${size(stats.dbSize)}. ${plural(stats.connections, "open connection", "open connections")}. Up ${duration(stats.uptime)}. Version ${stats.version}.`;
+
+  const mode = $("mode");
+  mode.hidden = false;
+  mode.className = stats.allowList ? "mode closed" : "mode";
+  mode.textContent = stats.allowList
+    ? "Closed: only allowed pubkeys and admins can sign in"
+    : "Open: any pubkey can sign in and store events";
+
+  const bar = $("storage-bar");
+  const rows = $("users");
+  bar.replaceChildren();
+  rows.replaceChildren();
+
+  const grow = (bytes) => ((bytes / stats.storage) * 1000).toFixed(3);
+  const segments = new Map();
+  const shown = stats.topUsers.slice(0, 16);
+  let shownBytes = 0;
+
+  shown.forEach((user, i) => {
+    if (!stats.storage || !user.bytes) return;
+    shownBytes += user.bytes;
+    const segment = h("span", {
+      class: user.status === "banned" ? "banned" : "",
+      style: `flex: ${grow(user.bytes)} 1 0; opacity: ${Math.max(0.35, 1 - i * 0.05)}`,
+      title: `${npub(user.pubkey)}: ${size(user.bytes)}`,
+    });
+    segments.set(user.pubkey, segment);
+    bar.append(segment);
+  });
+
+  if (stats.storage > shownBytes) {
+    bar.append(h("span", { class: "rest", style: `flex: ${grow(stats.storage - shownBytes)} 1 0`, title: `Everyone else: ${size(stats.storage - shownBytes)}` }));
+  }
+
+  for (const user of stats.topUsers) {
+    const share = stats.storage ? (user.bytes / stats.storage) * 100 : 0;
+    const banned = user.status === "banned";
+    const allowed = user.status === "allowed";
+
+    const row = h("tr", {},
+      h("td", {},
+        keyCell(user.pubkey),
+        user.status && h("span", { class: `badge ${user.status}` }, banned ? "Banned" : "Allowed"),
+      ),
+      h("td", { class: "num" }, numbers.format(user.events)),
+      h("td", { class: "num" }, size(user.bytes)),
+      h("td", { class: "num hide-narrow" }, `${share < 0.1 && share > 0 ? "<0.1" : share.toFixed(1)}%`),
+      h("td", { class: "num hide-narrow" }, ago(user.lastCreatedAt)),
+      h("td", {},
+        h("div", { class: "row-actions" },
+          allowed
+            ? h("button", { class: "quiet", type: "button", title: "Remove from the allow list", onclick: (e) => revoke(e.currentTarget, user.pubkey) }, "Revoke")
+            : h("button", { class: "quiet", type: "button", onclick: (e) => allowWithReason(e.currentTarget, user.pubkey) }, "Allow"),
+          banned
+            ? h("button", { class: "quiet", type: "button", onclick: (e) => unban(e.currentTarget, user.pubkey) }, "Unban")
+            : h("button", { class: "quiet danger-text", type: "button", onclick: (e) => banWithReason(e.currentTarget, user.pubkey) }, "Ban"),
+          h("button", { class: "quiet danger-text", type: "button", onclick: (e) => erase(e.currentTarget, user.pubkey, user.events) }, "Erase"),
+        ),
+      ),
+    );
+
+    const segment = segments.get(user.pubkey);
+    if (segment) {
+      const on = () => { row.classList.add("hl"); segment.classList.add("hl"); };
+      const off = () => { row.classList.remove("hl"); segment.classList.remove("hl"); };
+      for (const el of [row, segment]) {
+        el.addEventListener("mouseenter", on);
+        el.addEventListener("mouseleave", off);
+      }
+    }
+
+    rows.append(row);
+  }
+
+  $("users-empty").hidden = stats.topUsers.length > 0;
+  $("users-note").textContent = stats.users > stats.topUsers.length
+    ? `Showing the ${numbers.format(stats.topUsers.length)} pubkeys that use the most storage. A gift wrap counts for its recipient.`
+    : "A gift wrap counts for its recipient.";
+}
+
+async function loadStats(button) {
+  await act(button, "Couldn't load storage", async () => {
+    renderStats(await rpc("stats", [100]));
+    state.loaded.add("storage");
+  });
+}
+
+// Reloads the current tab only: each reload is another request for the extension to sign
+async function afterChange() {
+  const tab = currentTab();
+  for (const other of ["storage", "access"]) if (other !== tab) state.loaded.delete(other);
+  await loaders[tab]();
+}
+
+async function banWithReason(button, pubkey) {
+  const answer = await confirmDialog({
+    title: "Ban this pubkey?",
+    text: `${displayKey(pubkey)} won't be able to sign in or store events. Its stored events stay until you erase them.`,
+    ok: "Ban pubkey",
+    danger: true,
+    reason: true,
+  });
+  if (answer && await act(button, "Ban failed", () => rpc("banpubkey", [pubkey, answer.reason]))) await afterChange();
+}
+
+async function allowWithReason(button, pubkey) {
+  const answer = await confirmDialog({
+    title: "Allow this pubkey?",
+    text: `${displayKey(pubkey)} goes on the allow list. While that list has anyone on it, only allowed pubkeys and admins can sign in.`,
+    ok: "Allow pubkey",
+    reason: true,
+  });
+  if (answer && await act(button, "Allow failed", () => rpc("allowpubkey", [pubkey, answer.reason]))) await afterChange();
+}
+
+async function unban(button, pubkey) {
+  if (await act(button, "Unban failed", () => rpc("unbanpubkey", [pubkey]))) await afterChange();
+}
+
+async function revoke(button, pubkey) {
+  if (await act(button, "Revoke failed", () => rpc("unallowpubkey", [pubkey]))) await afterChange();
+}
+
+async function erase(button, pubkey, events) {
+  const answer = await confirmDialog({
+    title: "Erase this pubkey's data?",
+    text: `This deletes ${events ? plural(events, "event", "events") : "every event"} stored for ${displayKey(pubkey)}, including gift wraps addressed to it. It can't be undone.`,
+    ok: "Erase data",
+    danger: true,
+  });
+  if (!answer) return false;
+
+  const done = await act(button, "Erase failed", () => rpc("erasepubkey", [pubkey]));
+  if (done) await afterChange();
+  return done;
+}
+
+$("refresh-storage").addEventListener("click", (e) => loadStats(e.currentTarget));
+
+$("erase-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const input = form.elements.pubkey.value.trim();
+  if (await erase(form.querySelector("button"), input, null)) form.reset();
+});
+
+// Access
+
+function renderList(list, items, { empty, actionLabel, onAction }) {
+  list.replaceChildren();
+  if (!items.length) {
+    list.append(h("li", { class: "empty" }, empty));
+    return;
+  }
+  for (const item of items) {
+    list.append(h("li", {},
+      h("div", { class: "item" },
+        item.pubkey ? keyCell(item.pubkey) : h("code", { class: "key" }, item.ip),
+        item.reason && h("span", { class: "reason" }, item.reason),
+      ),
+      h("button", { class: "quiet", type: "button", onclick: (e) => onAction(e.currentTarget, item) }, actionLabel),
+    ));
+  }
+}
+
+async function loadAccess(button) {
+  await act(button, "Couldn't load the access lists", async () => {
+    const allowed = await rpc("listallowedpubkeys");
+    const banned = await rpc("listbannedpubkeys");
+
+    renderList($("allowed"), allowed, {
+      empty: "Nobody yet, so the relay is open to every pubkey.",
+      actionLabel: "Revoke",
+      onAction: (b, item) => revoke(b, item.pubkey),
+    });
+    renderList($("banned"), banned, {
+      empty: "No banned pubkeys.",
+      actionLabel: "Unban",
+      onAction: (b, item) => unban(b, item.pubkey),
+    });
+    state.loaded.add("access");
+  });
+}
+
+function listForm(id, method, context) {
+  $(id).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const params = [form.elements.pubkey.value.trim(), form.elements.reason.value.trim()];
+    if (await act(form.querySelector("button[type=submit]"), context, () => rpc(method, params))) {
+      form.reset();
+      await afterChange();
+    }
+  });
+}
+
+listForm("allow-form", "allowpubkey", "Allow failed");
+listForm("ban-form", "banpubkey", "Ban failed");
+$("refresh-access").addEventListener("click", (e) => loadAccess(e.currentTarget));
+
+// IP blocks
+
+async function loadIps(button) {
+  await act(button, "Couldn't load blocked IPs", async () => {
+    renderList($("ips"), await rpc("listblockedips"), {
+      empty: "No blocked IP addresses.",
+      actionLabel: "Unblock",
+      onAction: async (b, item) => {
+        if (await act(b, "Unblock failed", () => rpc("unblockip", [item.ip]))) await loadIps();
+      },
+    });
+    state.loaded.add("ips");
+  });
+}
+
+$("ip-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const params = [form.elements.ip.value.trim(), form.elements.reason.value.trim()];
+  if (await act(form.querySelector("button"), "Block failed", () => rpc("blockip", params))) {
+    form.reset();
+    await loadIps();
+  }
+});
+
+// Relay info, read from NIP-11 without signing anything
+
+async function fetchInfo() {
+  const res = await fetch(apiUrl, { headers: { Accept: "application/nostr+json" } });
+  return await res.json();
+}
+
+function showRelayIdentity(info) {
+  $("relay-name").textContent = info.name || "Relay admin";
+  document.title = `${info.name || "Relay"} admin`;
+  const icon = $("relay-icon");
+  icon.hidden = !info.icon;
+  $("mark").style.display = info.icon ? "none" : "";
+  if (info.icon) icon.src = info.icon;
+}
+
+function setIconPreview(url) {
+  const img = $("icon-preview");
+  img.hidden = !url;
+  if (url) img.src = url;
+}
+
+async function loadInfo() {
+  await act(null, "Couldn't load relay info", async () => {
+    const info = await fetchInfo();
+    state.info = { name: info.name || "", description: info.description || "", icon: info.icon || "" };
+    const form = $("info-form");
+    for (const field of ["name", "description", "icon"]) form.elements[field].value = state.info[field];
+    setIconPreview(state.info.icon);
+    $("info-save").textContent = "Save relay info";
+    state.loaded.add("info");
+  });
+}
+
+$("info-form").addEventListener("input", (e) => {
+  $("info-save").textContent = "Save relay info";
+  $("info-save").disabled = false;
+  if (e.target.name === "icon") setIconPreview(e.target.value.trim());
+});
+
+$("info-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  const methods = { name: "changerelayname", description: "changerelaydescription", icon: "changerelayicon" };
+  const changed = Object.keys(methods).filter((field) => form.elements[field].value.trim() !== state.info[field]);
+  if (!changed.length) return;
+
+  const saved = await act($("info-save"), "Saving relay info failed", async () => {
+    for (const field of changed) await rpc(methods[field], [form.elements[field].value.trim()]);
+  });
+
+  await loadInfo();
+  showRelayIdentity(state.info);
+  if (saved) {
+    $("info-save").textContent = "Saved";
+    $("info-save").disabled = true;
+  }
+});
+
+// Tabs
+
+const loaders = { storage: loadStats, access: loadAccess, ips: loadIps, info: loadInfo };
+
+function currentTab() {
+  return document.querySelector("nav [aria-selected=true]").dataset.tab;
+}
+
+function selectTab(tab) {
+  for (const button of document.querySelectorAll("nav button")) {
+    const selected = button.dataset.tab === tab;
+    button.setAttribute("aria-selected", selected);
+    button.tabIndex = selected ? 0 : -1;
+    $(`tab-${button.dataset.tab}`).hidden = !selected;
+  }
+  if (loaders[tab] && !state.loaded.has(tab)) loaders[tab]();
+}
+
+for (const button of document.querySelectorAll("nav button")) {
+  button.addEventListener("click", () => selectTab(button.dataset.tab));
+  button.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const tabs = [...document.querySelectorAll("nav button")];
+    const next = tabs[(tabs.indexOf(button) + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    next.focus();
+    selectTab(next.dataset.tab);
+  });
+}
+
+// Sign in
+
+async function waitForExtension() {
+  for (let i = 0; i < 20 && !window.nostr; i++) await new Promise((r) => setTimeout(r, 100));
+  return !!window.nostr;
+}
+
+function signinError(message) {
+  $("signin-error").textContent = message;
+  $("signin-error").hidden = false;
+}
+
+$("sign-in").addEventListener("click", async (e) => {
+  const button = e.currentTarget;
+  $("signin-error").hidden = true;
+
+  if (!window.isSecureContext) {
+    signinError("This page needs HTTPS (or localhost) to sign requests. Open it through the relay's https:// address.");
+    return;
+  }
+
+  if (!await waitForExtension()) {
+    signinError("No Nostr extension found. Install one that supports NIP-07, such as Alby or nos2x, then reload this page.");
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    state.pubkey = await window.nostr.getPublicKey();
+    const stats = await rpc("stats", [100]);
+
+    $("who-key").textContent = npub(state.pubkey);
+    $("who-key").title = npub(state.pubkey);
+    $("who").hidden = false;
+    $("signin").hidden = true;
+    $("app").hidden = false;
+    renderStats(stats);
+    state.loaded.add("storage");
+    selectTab("storage");
+  } catch (err) {
+    signinError(err.status === 401 && err.message.includes("not an admin")
+      ? `${npub(state.pubkey)} is not an admin of this relay. Add it to relay.admin.pubkeys in strfry.conf.`
+      : err.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("sign-out").addEventListener("click", () => {
+  state.pubkey = null;
+  state.loaded.clear();
+  $("who").hidden = true;
+  $("app").hidden = true;
+  $("error").hidden = true;
+  $("signin").hidden = false;
+});
+
+fetchInfo().then(showRelayIdentity).catch(() => {});
+</script>
+</body>
+</html>

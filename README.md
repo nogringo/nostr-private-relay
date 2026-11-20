@@ -10,6 +10,7 @@ A private storage relay for the relay list of [NIP-37](https://github.com/nostr-
 * **Deletion that sticks.** [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletions by id or address, [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts), and [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) requests to vanish: a request naming this relay (or `ALL_RELAYS`) is accepted without AUTH, erases everything from the pubkey and every gift wrap addressed to it, and keeps the erased events from being published again.
 * **Room for any encrypted payload.** The default `events.maxEventSize` fits the largest NIP-44 ciphertext, so a long draft is never rejected for its size.
 * **Clients know what to expect.** The AUTH challenge is sent as soon as a client connects, `CLOSED`/`OK` messages use the machine-readable `auth-required:` and `restricted:` prefixes, and NIP-11 lists NIPs 37, 42, 62 and 77 with `auth_required` and `restricted_writes` set.
+* **An admin page that can't read your events.** [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) management and a `/admin` page show how much space each pubkey uses, ban or allow pubkeys, block IPs, erase a pubkey's data and edit the relay info. The page shows sizes and counts, never what is stored.
 
 ### Setup
 
@@ -30,6 +31,29 @@ These options control private storage, all under `relay.auth`:
 | `maxPubkeysPerConnection` | `10` | How many pubkeys one connection can AUTH as |
 
 Set `authorOnlyReads` and `authorOnlyWrites` to `false` to get the behaviour of a regular strfry relay.
+
+### Administration
+
+List the admin pubkeys in the config, then open `https://private.example.com/admin` and sign in with a [NIP-07](https://github.com/nostr-protocol/nips/blob/master/07.md) extension that holds one of them:
+
+    relay {
+        admin {
+            pubkeys = "npub1..."
+        }
+    }
+
+The page talks to the relay through [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md), so any NIP-86 client works too. Every request carries a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) `Authorization` header signed by an admin, whose `u` tag names this relay (`relay.auth.serviceUrl`), with a `method` tag of `POST` and a `payload` tag holding the SHA-256 of the body. The relay answers `401` to anything else.
+
+| Method | Params | |
+| --- | --- | --- |
+| `banpubkey`, `unbanpubkey`, `listbannedpubkeys` | `[pubkey, reason?]` | A banned pubkey can't AUTH, and can't store events even on a connection it already authenticated (which can still read its own events until it closes). It can still send a request to vanish. |
+| `allowpubkey`, `unallowpubkey`, `listallowedpubkeys` | `[pubkey, reason?]` | While the allow list has at least one pubkey, only allowed pubkeys and admins can AUTH and store events. |
+| `blockip`, `unblockip`, `listblockedips` | `[ip, reason?]` | A blocked IP can't connect, and its open connections are closed. Behind a reverse proxy, set `relay.realIpHeader`. |
+| `changerelayname`, `changerelaydescription`, `changerelayicon` | `[value]` | Overrides `relay.info` in NIP-11 and on the home page. An empty value goes back to the config. |
+| `stats` | `[limit?]` | Events, storage, users and connections, with the `limit` pubkeys (100 by default) using the most storage. A gift wrap counts for its recipient. It reads the whole DB. |
+| `erasepubkey` | `[pubkey]` | Deletes everything a request to vanish would: the events the pubkey signed and the gift wraps addressed to it. Returns how many were deleted. |
+
+Pubkeys can be given in hex or as an npub. These lists and settings are stored in the DB, so every strfry process using it applies them, and they survive restarts.
 
 ### Limits
 

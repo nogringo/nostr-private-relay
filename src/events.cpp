@@ -290,6 +290,28 @@ static bool signerCanDelete(uint64_t kind) {
 }
 
 
+// NIP-62: everything the pubkey signed up to `until`, and every gift wrap addressed to it
+void collectOwnedEvents(lmdb::txn &txn, std::string_view pubkey, uint64_t until, std::vector<uint64_t> &levIds) {
+    env.generic_foreachFull(txn, env.dbi_Event__pubkey, makeKey_StringUint64(pubkey, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+        ParsedKey_StringUint64 parsedKey(k);
+        if (parsedKey.s != pubkey || parsedKey.n > until) return false;
+        uint64_t levId = lmdb::from_sv<uint64_t>(v);
+        if (signerCanDelete(PackedEventView(lookupEventByLevId(txn, levId).buf).kind())) levIds.push_back(levId);
+        return true;
+    });
+
+    std::string wrapTag = std::string("p") + std::string(pubkey);
+    env.generic_foreachFull(txn, env.dbi_Event__tag, makeKey_StringUint64(wrapTag, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+        ParsedKey_StringUint64 parsedKey(k);
+        if (parsedKey.s != wrapTag) return false;
+        uint64_t levId = lmdb::from_sv<uint64_t>(v);
+        auto kind = PackedEventView(lookupEventByLevId(txn, levId).buf).kind();
+        if (kind == 1059 || kind == 21059) levIds.push_back(levId);
+        return true;
+    });
+}
+
+
 static bool isEventABeforeEventB(const PackedEventView &a, const PackedEventView &b) {
     // If timestamps are equal, then according to NIP-01, the one with the *greatest* lexical id is considered "earlier" (ie, discarded).
     return a.created_at() < b.created_at() || (a.created_at() == b.created_at() && a.id() > b.id());
@@ -405,24 +427,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
             }
 
             if (packed.kind() == 62 && ev.status == EventWriteStatus::Pending && isVanishRequestForThisRelay(tao::json::from_string(ev.jsonStr))) {
-                // NIP-62: delete everything from the pubkey up to the request, and every gift wrap addressed to it
-                env.generic_foreachFull(txn, env.dbi_Event__pubkey, makeKey_StringUint64(packed.pubkey(), 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
-                    ParsedKey_StringUint64 parsedKey(k);
-                    if (parsedKey.s != packed.pubkey() || parsedKey.n > packed.created_at()) return false;
-                    uint64_t levId = lmdb::from_sv<uint64_t>(v);
-                    if (signerCanDelete(PackedEventView(lookupEventByLevId(txn, levId).buf).kind())) levIdsToDelete.push_back(levId);
-                    return true;
-                });
-
-                std::string wrapTag = std::string("p") + std::string(packed.pubkey());
-                env.generic_foreachFull(txn, env.dbi_Event__tag, makeKey_StringUint64(wrapTag, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
-                    ParsedKey_StringUint64 parsedKey(k);
-                    if (parsedKey.s != wrapTag) return false;
-                    uint64_t levId = lmdb::from_sv<uint64_t>(v);
-                    auto kind = PackedEventView(lookupEventByLevId(txn, levId).buf).kind();
-                    if (kind == 1059 || kind == 21059) levIdsToDelete.push_back(levId);
-                    return true;
-                });
+                collectOwnedEvents(txn, packed.pubkey(), packed.created_at(), levIdsToDelete);
 
                 if (logDeletions) LI << "Request to vanish from " << to_hex(packed.pubkey()) << ", deleting " << levIdsToDelete.size() << " events";
             }

@@ -2,6 +2,7 @@
 #include "RelayUrl.h"
 #include "jsonParseUtils.h"
 #include "ReadRestrictor.h"
+#include "AccessControl.h"
 
 
 static bool privateStorage() {
@@ -59,7 +60,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                             if (cfg().relay__logging__dumpInAll) LI << "[" << msg->connId << "] dumpInAuth: " << msg->payload;
 
                             try {
-                                ingesterProcessAuth(rsctx, msg->connId, arr[1]);
+                                ingesterProcessAuth(txn, rsctx, msg->connId, arr[1]);
                             } catch (std::exception &e) {
                                 PrometheusMetrics::getInstance().authFailureTotal.inc();
                                 sendOKResponse(msg->connId, arr[1].is_object() && arr[1].at("id").is_string() ? arr[1].at("id").get_string() : "?",
@@ -143,6 +144,7 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
 
     PackedEventView packed(packedStr);
     Bytes32 authedPubkey;
+    bool isVanishRequest = isVanishRequestForThisRelay(origJson);
 
     {
         // discard reposts that embed protected events
@@ -166,7 +168,7 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         });
 
         // NIP-62: a request to vanish is signed by the pubkey it erases, so it needs no AUTH
-        bool ownerOnly = cfg().relay__auth__authorOnlyWrites && !isVanishRequestForThisRelay(origJson);
+        bool ownerOnly = cfg().relay__auth__authorOnlyWrites && !isVanishRequest;
 
         if (foundProtected || ownerOnly) {
             // NIP-70 protected events must be rejected unless published by an authenticated public key
@@ -204,6 +206,17 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
 
             // otherwise we proceed to accept the event
             authedPubkey = owner;
+        }
+    }
+
+    // Banned pubkeys can still vanish
+    if (!isVanishRequest) {
+        auto owner = ReadRestrictor::ownerOf(packed);
+        auto refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
+
+        if (refusal.size()) {
+            sendOKResponse(connId, to_hex(packed.id()), false, "blocked: " + refusal);
+            return;
         }
     }
 
@@ -300,7 +313,7 @@ void RelayServer::ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const ta
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::RemoveSub{connId, SubId(jsonGetString(arr[1], "CLOSE subscription id was not a string"))}});
 }
 
-void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson) {
+void RelayServer::ingesterProcessAuth(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &eventJson) {
     if (cfg().relay__auth__serviceUrl.empty()) throw herr("relay needs serviceUrl to be configured before AUTH can work");
 
     std::string packedStr, jsonStr;
@@ -347,6 +360,12 @@ void RelayServer::ingesterProcessAuth(RelayServerCtx &rsctx, uint64_t connId, co
     if (as.authed.size() >= cfg().relay__auth__maxPubkeysPerConnection) {
         PrometheusMetrics::getInstance().authFailureTotal.inc();
         sendOKResponse(connId, idHex, false, "restricted: too many pubkeys authenticated on this connection");
+        return;
+    }
+
+    if (auto refusal = AccessControl::refusal(txn, packed.pubkey()); refusal.size()) {
+        PrometheusMetrics::getInstance().authFailureTotal.inc();
+        sendOKResponse(connId, idHex, false, "restricted: " + refusal);
         return;
     }
 

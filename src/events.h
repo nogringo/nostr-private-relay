@@ -89,6 +89,7 @@ struct EventToWrite {
 
 void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vector<EventToWrite> &evs, bool logDeletions = true);
 bool isVanishRequestForThisRelay(const tao::json::value &evJson);
+void collectOwnedEvents(lmdb::txn &txn, std::string_view pubkey, uint64_t until, std::vector<uint64_t> &levIds);
 bool deleteEventBasic(lmdb::txn &txn, uint64_t levId);
 
 template <typename C>

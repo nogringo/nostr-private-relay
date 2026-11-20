@@ -31,6 +31,12 @@ node "./test/tests/privateStorageTest.js" \
   && pass "./test/tests/privateStorageTest.js" \
   || fail "./test/tests/privateStorageTest.js failed"
 
+info "running relay management tests..."
+
+node "./test/tests/adminTest.js" \
+  && pass "./test/tests/adminTest.js" \
+  || fail "./test/tests/adminTest.js failed"
+
 info "Seeding events..."
 
 perl "./test/utils/generate-seed-data.pl" -o - | ./strfry --config ./test/cfgs/test.conf import --no-verify
