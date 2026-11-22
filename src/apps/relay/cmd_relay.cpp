@@ -2,6 +2,7 @@
 #include <signal.h>
 
 #include <docopt.h>
+#include <curl/curl.h>
 
 #include "RelayServer.h"
 #include "AccessControl.h"
@@ -67,6 +68,9 @@ void RelayServer::run() {
         if (s != 0) throw herr("Unable to set sigmask: ", strerror(errno));
     }
 
+    // Not thread-safe, so before any thread uses curl
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw herr("Unable to initialise libcurl");
+
     tpWebsocket.init("Websocket", 1, [this](auto &thr){
         runWebsocket(thr);
     });
@@ -97,6 +101,10 @@ void RelayServer::run() {
 
     cronThread = std::thread([this]{
         runCron();
+    });
+
+    webhooksThread = std::thread([this]{
+        runWebhooks();
     });
 
     signalHandlerThread = std::thread([this]{

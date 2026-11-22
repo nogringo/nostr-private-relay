@@ -3,6 +3,7 @@
 #include "jsonParseUtils.h"
 #include "ReadRestrictor.h"
 #include "AccessControl.h"
+#include "Webhooks.h"
 
 
 static bool privateStorage() {
@@ -216,6 +217,21 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
 
         if (refusal.size()) {
             sendOKResponse(connId, to_hex(packed.id()), false, "blocked: " + refusal);
+            return;
+        }
+    }
+
+    // NIP-9a: a subscription the relay won't fulfill is refused, with the reason
+    if (packed.kind() == Webhooks::subscriptionKind) {
+        if (!Webhooks::active()) {
+            sendOKResponse(connId, to_hex(packed.id()), false, "blocked: this relay doesn't push events to webhooks");
+            return;
+        }
+
+        Webhooks::parse(origJson);
+
+        if (Webhooks::countOtherSubscriptions(txn, packed) >= cfg().relay__webhooks__maxSubscriptionsPerPubkey) {
+            sendOKResponse(connId, to_hex(packed.id()), false, "blocked: too many webhook subscriptions for this pubkey");
             return;
         }
     }

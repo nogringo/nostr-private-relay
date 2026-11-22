@@ -4,7 +4,7 @@ OPT  ?= -O3 -g
 
 include golpe/rules.mk
 
-LDLIBS += -lsecp256k1 -lzstd
+LDLIBS += -lsecp256k1 -lzstd -lcurl
 ifeq ($(shell uname -s),Darwin)
 LDLIBS += -luv
 BREW_PREFIX    := $(shell brew --prefix 2>/dev/null)

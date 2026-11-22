@@ -14,6 +14,10 @@ Tests should be run from the *root* of the project.
 
     node test/tests/privateStorageTest.js
 
+## Webhook tests (NIP-9a kind 30390 subscriptions):
+
+    node test/tests/webhookTest.js
+
 ## Fuzz tests
 
 Note that these tests need a well populated DB. For best coverage, use the [wellordered 500k](https://wiki.wellorder.net/wiki/nostr-datasets/) data-set:

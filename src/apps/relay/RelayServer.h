@@ -259,6 +259,7 @@ struct RelayServer {
     ThreadPool<MsgNegentropy> tpNegentropy;
     ThreadPool<MsgAdmin> tpAdmin;
     std::thread cronThread;
+    std::thread webhooksThread;
     std::thread signalHandlerThread;
 
     void run();
@@ -285,6 +286,8 @@ struct RelayServer {
     void runAdmin(ThreadPool<MsgAdmin>::Thread &thr);
 
     void runCron();
+
+    void runWebhooks();
 
     void runSignalHandler();
 

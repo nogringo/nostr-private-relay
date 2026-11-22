@@ -12,8 +12,12 @@ export function config(
   relayDb,
   relayPort = 40553,
   restrictReadToInvolvedPubkey = true,
-  { privateStorage = false, maxPubkeysPerConnection = 10, adminPubkeys = "" } = {},
+  { privateStorage = false, maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {},
 ) {
+  const webhookOptions = Object.entries(webhooks)
+    .map(([k, v]) => `\n    ${k} = ${v}`)
+    .join("");
+
   return `
 db = "${relayDb}/"
 
@@ -35,6 +39,9 @@ relay {
 
   admin {
     pubkeys = "${adminPubkeys}"
+  }
+
+  webhooks {${webhookOptions}
   }
 
   numThreads {

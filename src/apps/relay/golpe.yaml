@@ -41,6 +41,22 @@ config:
     desc: "NIP-86 relay management: comma-separated pubkeys (npub or hex) allowed to use the management API and the /admin page"
     default: ""
 
+  - name: relay__webhooks__enabled
+    desc: "NIP-9a: POST the events matching a kind 30390 subscription to its callback URL. Needs authorOnlyReads and serviceUrl."
+    default: true
+  - name: relay__webhooks__maxSubscriptionsPerPubkey
+    desc: "Maximum number of kind 30390 subscriptions a pubkey can store"
+    default: 20
+  - name: relay__webhooks__timeoutSeconds
+    desc: "How long a callback has to answer a POST"
+    default: 10
+  - name: relay__webhooks__allowHttp
+    desc: "Accept http:// callbacks, which send the events unencrypted"
+    default: false
+  - name: relay__webhooks__allowPrivateAddresses
+    desc: "Let callbacks reach loopback, private and link-local addresses, such as a push server on the relay's own network"
+    default: false
+
   - name: relay__info__name
     desc: "NIP-11: Name of this server. Short/descriptive (< 30 characters)"
     default: "nostr-private-relay"

@@ -37,6 +37,12 @@ node "./test/tests/adminTest.js" \
   && pass "./test/tests/adminTest.js" \
   || fail "./test/tests/adminTest.js failed"
 
+info "running webhook tests..."
+
+node "./test/tests/webhookTest.js" \
+  && pass "./test/tests/webhookTest.js" \
+  || fail "./test/tests/webhookTest.js failed"
+
 info "Seeding events..."
 
 perl "./test/utils/generate-seed-data.pl" -o - | ./strfry --config ./test/cfgs/test.conf import --no-verify

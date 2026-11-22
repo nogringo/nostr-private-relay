@@ -17,7 +17,8 @@ RUN \
     pkgconfig \
     libtool \
     ca-certificates \
-    libressl-dev \
+    openssl-dev \
+    curl-dev \
     zlib-dev \
     lmdb-dev \
     flatbuffers-dev \
@@ -44,7 +45,9 @@ RUN \
     libsecp256k1 \
     libb2 \
     zstd \
-    libressl \
+    libssl3 \
+    libcurl \
+    ca-certificates \
   && rm -rf /var/cache/apk/*
 
 # Create a non-root user for security
