@@ -223,7 +223,9 @@ async function testAllowList() {
   const refused = await authAs(client, bob);
   expect(refused[2] === false && refused[3].startsWith("restricted:"), `a pubkey off the allow list can't AUTH: ${refused[3]}`);
   expect((await authAs(client, carol))[2] === true, "an allowed pubkey can AUTH");
-  expect((await authAs(client, admin))[2] === true, "admins can always AUTH");
+  const adminConn = await connect();
+  expect((await authAs(adminConn, admin))[2] === true, "admins can always AUTH");
+  await adminConn.close();
 
   await call("banpubkey", [carol.pub]);
   const allowed = await call("listallowedpubkeys");
@@ -320,23 +322,22 @@ async function testErasePubkey() {
   await authAs(bobConn, bob);
   const keptByBob = sign(alice, { content: "kept by bob" });
   expect((await publish(bobConn, keptByBob))[2] === true, "bob should store a copy of alice's event");
-  await bobConn.close();
 
-  const client = await connect();
-  await authAs(client, alice);
-  await authAs(client, bob);
+  const aliceConn = await connect();
+  expect((await authAs(aliceConn, alice))[2] === true, "alice should AUTH");
 
   const deleted = await call("erasepubkey", [alice.pub]);
   expect(deleted === 5, `erasepubkey must delete what alice stored: her events, the wrap addressed to her and her copy of bob's event, got ${deleted}`);
 
-  const left = await query(client, "left", {});
-  expect(left.every((ev) => ev.id === keptByBob.id || (ev.pubkey !== alice.pub && ev.kind !== 1059)), "nothing alice stored must remain");
-  expect(left.some((ev) => ev.id === keptByBob.id), "the copy of alice's event that bob stored must remain");
-  expect(left.some((ev) => ev.pubkey === bob.pub), "bob's events must remain, including the one alice had a copy of");
+  expect((await query(aliceConn, "left", {})).length === 0, "nothing alice stored must remain");
+  const bobsLeft = await query(bobConn, "left", {});
+  expect(bobsLeft.some((ev) => ev.id === keptByBob.id), "the copy of alice's event that bob stored must remain");
+  expect(bobsLeft.some((ev) => ev.pubkey === bob.pub), "bob's events must remain, including the one alice had a copy of");
 
   const stats = await call("stats");
   expect(!stats.topUsers.some((u) => u.pubkey === alice.pub), "alice must be gone from the stats");
-  await client.close();
+  await aliceConn.close();
+  await bobConn.close();
 
   pass("testErasePubkey");
 }

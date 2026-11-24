@@ -5,10 +5,9 @@
 #include "Webhooks.h"
 
 
-static const AuthedPubkeys &sessionPubkeys(const RelayServerCtx &rsctx, uint64_t connId) {
-    static const AuthedPubkeys none;
+static std::string sessionPubkey(const RelayServerCtx &rsctx, uint64_t connId) {
     auto it = rsctx.connIdToAuthSession.find(connId);
-    return it == rsctx.connIdToAuthSession.end() ? none : it->second.authed;
+    return it == rsctx.connIdToAuthSession.end() ? "" : it->second.pubkey;
 }
 
 
@@ -107,7 +106,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
             } else if (auto msg = std::get_if<MsgIngester::CloseConn>(&newMsg.msg)) {
                 auto connId = msg->connId;
 
-                if (sessionPubkeys(rsctx, connId).size()) PrometheusMetrics::getInstance().authenticatedConnections.dec();
+                if (sessionPubkey(rsctx, connId).size()) PrometheusMetrics::getInstance().authenticatedConnections.dec();
                 rsctx.connIdToAuthSession.erase(connId);
 
                 tpWriter.dispatch(connId, MsgWriter{MsgWriter::CloseConn{connId}});
@@ -140,16 +139,8 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
 
     PackedEventView packed(packedStr);
     bool isVanishRequest = isVanishRequestForThisRelay(origJson);
-    const auto &authed = sessionPubkeys(rsctx, connId);
-
-    // NIP-37: who stores the event, which only they can read back. Its owner when authenticated,
-    // otherwise the first pubkey this connection authenticated as.
-    std::string uploader;
-
-    if (!authed.empty()) {
-        auto owner = ownerOf(packed);
-        uploader = std::string(owner.size() && authed.contains(owner) ? owner : authed.pubkeys[0].sv());
-    }
+    // NIP-37: the pubkey the connection authenticated as stores the event, and only it can read it back
+    std::string uploader = sessionPubkey(rsctx, connId);
 
     {
         // discard reposts that embed protected events
@@ -185,14 +176,14 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
                 return;
             }
 
-            if (authed.empty()) {
+            if (uploader.empty()) {
                 LI << "[" << connId << "] Event needs AUTH, requesting it: " << idHex;
                 sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
                 sendOKResponse(connId, idHex, false, foundProtected ? "auth-required: event marked as protected" : "auth-required: this relay only stores events of authenticated users");
                 return;
             }
 
-            if (foundProtected && !authed.contains(packed.pubkey())) {
+            if (foundProtected && uploader != packed.pubkey()) {
                 sendOKResponse(connId, idHex, false, "restricted: must be published by the author");
                 return;
             }
@@ -284,16 +275,16 @@ void RelayServer::ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint
         throw herr("filter validation failed: ", e.what());
     }
 
-    const auto &authed = sessionPubkeys(rsctx, connId);
+    auto uploader = sessionPubkey(rsctx, connId);
 
-    if (authed.empty()) {
+    if (uploader.empty()) {
         sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
         sendClosedError(connId, outSubIdStr, "auth-required: this relay only serves events to the authenticated user who stored them");
         return;
     }
 
-    // NIP-37: a subscription only ever sees what its connection's pubkeys uploaded
-    Subscription sub(connId, outSubIdStr, std::move(filterGroup), countOnly, authed);
+    // NIP-37: a subscription only ever sees what its connection's pubkey uploaded
+    Subscription sub(connId, outSubIdStr, std::move(filterGroup), countOnly, std::move(uploader));
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::NewSub{std::move(sub)}});
 }
 
@@ -342,14 +333,14 @@ void RelayServer::ingesterProcessAuth(lmdb::txn &txn, RelayServerCtx &rsctx, uin
 
     auto idHex = to_hex(packed.id());
 
-    if (as.authed.contains(packed.pubkey())) {
+    if (as.pubkey == packed.pubkey()) {
         sendOKResponse(connId, idHex, true, "duplicate: already authenticated");
         return;
     }
 
-    if (as.authed.size() >= cfg().relay__auth__maxPubkeysPerConnection) {
+    if (as.isAuthed()) {
         PrometheusMetrics::getInstance().authFailureTotal.inc();
-        sendOKResponse(connId, idHex, false, "restricted: too many pubkeys authenticated on this connection");
+        sendOKResponse(connId, idHex, false, "restricted: this connection is already authenticated as another pubkey");
         return;
     }
 
@@ -359,13 +350,10 @@ void RelayServer::ingesterProcessAuth(lmdb::txn &txn, RelayServerCtx &rsctx, uin
         return;
     }
 
-    // NIP-42: every pubkey a client AUTHs as stays authenticated for the connection
-    Bytes32 pubkey(packed.pubkey());
-    bool firstPubkey = as.authed.empty();
-    as.authed.add(pubkey);
+    as.pubkey = std::string(packed.pubkey());
 
     PrometheusMetrics::getInstance().authSuccessTotal.inc();
-    if (firstPubkey) PrometheusMetrics::getInstance().authenticatedConnections.inc();
+    PrometheusMetrics::getInstance().authenticatedConnections.inc();
 
     LI << "[" << connId << "] AUTHed as " << to_hex(packed.pubkey());
     sendOKResponse(connId, idHex, true, "successfully authenticated");
@@ -399,9 +387,9 @@ void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsct
         // validates the filter before anything else uses it
         NostrFilter requested(filterJson, maxFilterLimit);
 
-        const auto &authed = sessionPubkeys(rsctx, connId);
+        auto uploader = sessionPubkey(rsctx, connId);
 
-        if (authed.empty()) {
+        if (uploader.empty()) {
             sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
             sendNegErr("auth-required: this relay only serves events to the authenticated user who stored them");
             return;
@@ -410,7 +398,7 @@ void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsct
         NostrFilterGroup filterGroup;
         filterGroup.addFilter(filterJson, maxFilterLimit);
 
-        Subscription sub(connId, subscriptionStr, std::move(filterGroup), false, authed);
+        Subscription sub(connId, subscriptionStr, std::move(filterGroup), false, std::move(uploader));
 
         std::string negPayload = from_hex(jsonGetString(vals[3], "negentropy payload not a string"));
 

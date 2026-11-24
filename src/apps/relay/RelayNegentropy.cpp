@@ -4,7 +4,7 @@
 #include "RelayServer.h"
 #include "QueryScheduler.h"
 
-// NIP-37: a session only covers what its uploaders stored, so it never uses a pre-computed tree of every event
+// NIP-37: a session only covers what its uploader stored, so it never uses a pre-computed tree of every event
 struct NegentropyViews {
     struct MemoryView {
         std::string initialMsg;

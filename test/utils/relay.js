@@ -8,7 +8,7 @@ import ids from "./dummyIds.json" with { type: "json" };
 
 let ts = 1_700_000_000;
 
-export function config(relayDb, relayPort = 40553, { maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {}) {
+export function config(relayDb, relayPort = 40553, { adminPubkeys = "", webhooks = {} } = {}) {
   const webhookOptions = Object.entries(webhooks)
     .map(([k, v]) => `\n    ${k} = ${v}`)
     .join("");
@@ -24,7 +24,6 @@ relay {
 
   auth {
     serviceUrl = "wss://relay.test"
-    maxPubkeysPerConnection = ${maxPubkeysPerConnection}
   }
 
   admin {

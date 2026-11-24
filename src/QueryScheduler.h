@@ -21,7 +21,7 @@ struct QueryScheduler : NonCopyable {
     std::vector<uint64_t> levIdBatch;
 
     bool addSub(lmdb::txn &txn, Subscription &&sub) {
-        sub.latestEventId = sub.uploaders.empty() ? getMostRecentLevId(txn) : getMostRecentUploadId(txn);
+        sub.latestEventId = sub.uploader.empty() ? getMostRecentLevId(txn) : getMostRecentUploadId(txn);
 
         {
             auto *existing = findQuery(sub.connId, sub.subId);

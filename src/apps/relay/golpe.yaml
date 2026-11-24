@@ -18,9 +18,6 @@ config:
   - name: relay__auth__serviceUrl
     desc: "External relay URL (beginning with wss://). Required in order to validate challenge responses: without it, nobody can read or write."
     default: ""
-  - name: relay__auth__maxPubkeysPerConnection
-    desc: "Maximum number of pubkeys a single connection can AUTH as (NIP-42 allows several)"
-    default: 10
 
   - name: relay__admin__pubkeys
     desc: "NIP-86 relay management: comma-separated pubkeys (npub or hex) allowed to use the management API and the /admin page"

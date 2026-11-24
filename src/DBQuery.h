@@ -91,7 +91,7 @@ struct DBScan : NonCopyable {
     };
 
     const NostrFilter &f;
-    const AuthedPubkeys *uploaders = nullptr; // NIP-37: only what they uploaded
+    std::string_view uploader; // NIP-37: only what it uploaded
     bool indexOnly;
     lmdb::dbi indexDbi;
     bool uploadIndex = false; // its values are upload ids, not levIds
@@ -103,9 +103,8 @@ struct DBScan : NonCopyable {
     uint64_t nextInitIndex = 0;
     uint64_t approxWork = 0;
 
-    DBScan(const NostrFilter &f, const AuthedPubkeys *uploaders_ = nullptr) : f(f) {
+    DBScan(const NostrFilter &f, std::string_view uploader = "") : f(f), uploader(uploader) {
         indexOnly = f.indexOnlyScans;
-        if (uploaders_ && !uploaders_->empty()) uploaders = uploaders_;
 
         if (f.ids) {
             indexDbi = env.dbi_Event__id;
@@ -123,39 +122,19 @@ struct DBScan : NonCopyable {
                     }
                 );
             }
-        } else if (uploaders) {
+        } else if (uploader.size()) {
             // The upload indices hold neither authors nor tags
             indexOnly = false;
             uploadIndex = true;
 
-            const auto &pubkeys = uploaders->pubkeys;
-
-            if (f.kinds && pubkeys.size() * f.kinds->size() < 1'000) {
+            if (f.kinds && f.kinds->size() < 1'000) {
                 indexDbi = env.dbi_Upload__uploaderKind;
                 desc = "UploaderKind";
 
-                cursors.reserve(pubkeys.size() * f.kinds->size());
-                for (const auto &uploader : pubkeys) {
-                    for (uint64_t j = 0; j < f.kinds->size(); j++) {
-                        std::string search(uploader.sv());
-                        search += lmdb::to_sv<uint64_t>(f.kinds->at(j));
-
-                        cursors.emplace_back(
-                            search + std::string(8, '\xFF'),
-                            MAX_U64,
-                            [search](std::string_view k){
-                                return k.starts_with(search) ? KeyMatchResult::Yes : KeyMatchResult::No;
-                            }
-                        );
-                    }
-                }
-            } else {
-                indexDbi = env.dbi_Upload__uploader;
-                desc = "Uploader";
-
-                cursors.reserve(pubkeys.size());
-                for (const auto &uploader : pubkeys) {
-                    std::string search(uploader.sv());
+                cursors.reserve(f.kinds->size());
+                for (uint64_t i = 0; i < f.kinds->size(); i++) {
+                    std::string search(uploader);
+                    search += lmdb::to_sv<uint64_t>(f.kinds->at(i));
 
                     cursors.emplace_back(
                         search + std::string(8, '\xFF'),
@@ -165,6 +144,19 @@ struct DBScan : NonCopyable {
                         }
                     );
                 }
+            } else {
+                indexDbi = env.dbi_Upload__uploader;
+                desc = "Uploader";
+
+                std::string search(uploader);
+
+                cursors.emplace_back(
+                    search + std::string(8, '\xFF'),
+                    MAX_U64,
+                    [search](std::string_view k){
+                        return k.starts_with(search) ? KeyMatchResult::Yes : KeyMatchResult::No;
+                    }
+                );
             }
         } else if (f.tags.size()) {
             indexDbi = env.dbi_Event__tag;
@@ -272,18 +264,6 @@ struct DBScan : NonCopyable {
         refillScanDepth = 10 * initialScanDepth;
     }
 
-    // The oldest of the uploaders' uploads of this event, 0 if they have none
-    uint64_t firstUpload(lmdb::txn &txn, uint64_t levId) {
-        uint64_t output = 0;
-
-        for (const auto &uploader : uploaders->pubkeys) {
-            auto uploadId = lookupUpload(txn, uploader.sv(), levId);
-            if (uploadId && (!output || *uploadId < output)) output = *uploadId;
-        }
-
-        return output;
-    }
-
     // handleEvent gets the levId, and the upload id when scanning uploads (else the levId again)
     bool scan(lmdb::txn &txn, const std::function<bool(uint64_t, uint64_t)> &handleEvent, const std::function<bool(uint64_t)> &doPause) {
         auto cmp = [](auto &a, auto &b){
@@ -316,8 +296,8 @@ struct DBScan : NonCopyable {
             if (uploadIndex) {
                 auto upload = env.lookup_Upload(txn, seq);
                 levId = upload ? UploadView(upload->buf).levId() : 0;
-            } else if (uploaders) {
-                seq = firstUpload(txn, levId);
+            } else if (uploader.size()) {
+                seq = lookupUpload(txn, uploader, levId).value_or(0);
             }
 
             bool uploaded = levId && seq;
@@ -373,7 +353,7 @@ struct DBQuery : NonCopyable {
         while (filterGroupIndex < sub.filterGroup.size()) {
             const auto &f = sub.filterGroup.filters[filterGroupIndex];
 
-            if (!scanner) scanner = std::make_unique<DBScan>(f, &sub.uploaders);
+            if (!scanner) scanner = std::make_unique<DBScan>(f, sub.uploader);
 
             uint64_t startTime = hoytech::curr_time_us();
 

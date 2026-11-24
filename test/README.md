@@ -6,7 +6,7 @@ Tests should be run from the *root* of the project.
 
     node test/writeTest.js
 
-## Private storage tests (NIP-37 per-uploader storage, NIP-42 multi-pubkey AUTH, NIP-62 vanish):
+## Private storage tests (NIP-37 per-uploader storage, NIP-42 AUTH as one pubkey per connection, NIP-62 vanish):
 
     node test/tests/privateStorageTest.js
 

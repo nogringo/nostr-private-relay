@@ -4,7 +4,7 @@
 
 
 
-// NIP-37: every subscription is scoped to its uploaders, so it follows uploads rather than events
+// NIP-37: every subscription is scoped to its uploader, so it follows uploads rather than events
 void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
     auto dbChangeWatcher = hoytech::file_change_monitor(dbDir + "/data.mdb");
 
@@ -40,7 +40,7 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
                 auto connId = msg->sub.connId;
 
                 foreachUploadAfter(msg->sub.latestEventId, [&](uint64_t, const UploadView &upload, auto &ev){
-                    if (msg->sub.uploaders.contains(upload.uploader()) && msg->sub.filterGroup.doesMatch(PackedEventView(ev.buf))) {
+                    if (msg->sub.uploader == upload.uploader() && msg->sub.filterGroup.doesMatch(PackedEventView(ev.buf))) {
                         sendEvent(connId, msg->sub.subId, getEventJson(txn, decomp, ev.primaryKeyId));
                     }
                 });

@@ -45,7 +45,7 @@ function sign(user, { kind = 1, tags = [], content = "", created_at = now() } = 
 }
 
 function writeRelayConfig() {
-  writeConfig(config(dbDir, port, { maxPubkeysPerConnection: 2 }), cfgPath);
+  writeConfig(config(dbDir, port), cfgPath);
 }
 
 let wsUrl;
@@ -222,36 +222,26 @@ async function testReadsOnlyReturnOwnUploads({ aliceConn, bobConn }) {
   pass("testReadsOnlyReturnOwnUploads");
 }
 
-async function testSeveralPubkeysPerConnection({ aliceConn, bobConn }) {
+async function testOnePubkeyPerConnection({ bobConn }) {
   const client = await connect();
   expect((await authAs(client, alice))[2] === true, "first AUTH should succeed");
-  expect((await authAs(client, bob))[2] === true, "second AUTH as another pubkey should succeed");
 
-  const both = await query(client, "both", {});
+  const second = await authAs(client, bob);
   expect(
-    sameIds(both.events, new Set([...idsOf(alice), ...idsOf(bob)])),
-    "a connection authenticated as two pubkeys must see what both stored",
+    second[2] === false && second[3].startsWith("restricted:"),
+    `AUTH as a second pubkey must be restricted, got: ${second[3]}`,
   );
 
-  // The event's owner stores it when the connection authenticated as them, else the first pubkey
-  const bobsOwn = await store(client, sign(bob, { content: "bob, from a shared connection" }));
-  keep(bob, bobsOwn);
-  const carols = await store(client, sign(carol, { content: "carol, from a shared connection" }));
-  keep(alice, carols);
+  const reads = await query(client, "still-alice", {});
+  expect(sameIds(reads.events, idsOf(alice)), "a refused AUTH must leave the connection reading as the first pubkey");
 
-  const forBob = await query(bobConn, "shared-bob", { ids: [bobsOwn.id, carols.id] });
-  const forAlice = await query(aliceConn, "shared-alice", { ids: [bobsOwn.id, carols.id] });
-  expect(sameIds(forBob.events, new Set([bobsOwn.id])), "bob's event must be stored for bob");
-  expect(sameIds(forAlice.events, new Set([carols.id])), "someone else's event must be stored for the first pubkey");
-
-  const third = await authAs(client, carol);
-  expect(
-    third[2] === false && third[3].startsWith("restricted:"),
-    "AUTH beyond maxPubkeysPerConnection must be restricted",
-  );
+  const bobs = await store(client, sign(bob, { content: "bob, from alice's connection" }));
+  keep(alice, bobs);
+  const forBob = await query(bobConn, "not-for-bob", { ids: [bobs.id] });
+  expect(forBob.events.length === 0, "an event sent after a refused AUTH must be stored for the first pubkey only");
 
   await client.close();
-  pass("testSeveralPubkeysPerConnection");
+  pass("testOnePubkeyPerConnection");
 }
 
 async function testLiveEventsStayPrivate({ aliceConn, bobConn }) {
@@ -553,7 +543,7 @@ async function main() {
       try {
         await testUploadsAreKeptForTheirUploader(conns);
         await testReadsOnlyReturnOwnUploads(conns);
-        await testSeveralPubkeysPerConnection(conns);
+        await testOnePubkeyPerConnection(conns);
         await testLiveEventsStayPrivate(conns);
         const deletedWrap = await testGiftWraps(conns);
         await testSignerCantTouchAGiftWrap(conns);
