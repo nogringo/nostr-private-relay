@@ -5,7 +5,10 @@
 #include <algorithm>
 #include <utility>
 #include <unistd.h>
+#include <deque>
+#include <mutex>
 
+#include <curl/curl.h>
 #include <hoytech/time.h>
 #include <hoytech/hex.h>
 #include <hoytech/file_change_monitor.h>
@@ -125,6 +128,7 @@ struct MsgWriter : NonCopyable {
         std::string packedStr;
         std::string jsonStr;
         Bytes32 authed;
+        bool fromOwner = false; // received over a connection AUTHed as its owner, for NIP-9a ignore_self
     };
 
     struct CloseConn {
@@ -134,6 +138,19 @@ struct MsgWriter : NonCopyable {
     using Var = std::variant<AddEvent, CloseConn>;
     Var msg;
     MsgWriter(Var &&msg_) : msg(std::move(msg_)) {}
+};
+
+// NIP-9a: a kind 30390 event goes to the writer only once its callback echoes a challenge
+struct WebhookVerification {
+    MsgWriter::AddEvent event;
+    std::string callback;
+};
+
+struct WebhooksInbox {
+    std::mutex mutex;
+    std::deque<WebhookVerification> verifications;
+    flat_hash_set<uint64_t> ownerWrites; // levIds of fromOwner events, added before their commit
+    CURLM *multi = nullptr; // woken up by each new verification
 };
 
 struct MsgReqWorker : NonCopyable {
@@ -260,6 +277,7 @@ struct RelayServer {
     ThreadPool<MsgAdmin> tpAdmin;
     std::thread cronThread;
     std::thread webhooksThread;
+    WebhooksInbox webhooksInbox;
     std::thread signalHandlerThread;
 
     void run();
@@ -345,6 +363,12 @@ struct RelayServer {
         auto reply = tao::json::value::array({ "OK", eventIdHex, written, message });
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::Send{connId, std::move(tao::json::to_string(reply))}});
         hubTrigger->send();
+    }
+
+    void verifyWebhook(MsgWriter::AddEvent &&event, std::string &&callback) {
+        std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+        webhooksInbox.verifications.push_back(WebhookVerification{std::move(event), std::move(callback)});
+        if (webhooksInbox.multi) curl_multi_wakeup(webhooksInbox.multi);
     }
 
     void sendHttpReply(uint64_t requestId, int status, std::string &&body) {

@@ -32,27 +32,39 @@ function sign(user, { kind = 1, tags = [], content = "", created_at = now() } = 
   return finalizeEvent({ kind, tags, content, created_at }, user.sk);
 }
 
-function writeRelayConfig(webhooks) {
+function writeRelayConfig(webhooks, options = {}) {
   writeConfig(
     config(dbDir, port, true, {
       privateStorage: true,
+      ...options,
       webhooks: { maxSubscriptionsPerPubkey, allowHttp: true, ...webhooks },
     }),
     cfgPath,
   );
 }
 
-// Records every POST, and answers 404 under /gone/
+// Echoes each challenge, unless the path says otherwise. Records every request, and answers 404 to POSTs under /gone/
 class CallbackServer {
   constructor() {
     this.posts = [];
+    this.challenges = [];
     this.server = http.createServer((req, res) => {
       let body = "";
       req.on("data", (chunk) => (body += chunk));
       req.on("end", () => {
-        if (req.method === "POST") {
-          this.posts.push({ path: req.url, contentType: req.headers["content-type"], body: JSON.parse(body) });
+        if (req.method === "GET") {
+          const url = new URL(req.url, "http://callback");
+          const challenge = url.searchParams.get("challenge");
+          this.challenges.push({ path: url.pathname, query: url.search, challenge });
+
+          res.statusCode = url.pathname.startsWith("/echo-404/") ? 404 : 200;
+          if (url.pathname.startsWith("/no-echo/")) res.end("ok");
+          else if (url.pathname.startsWith("/echo-newline/")) res.end(`${challenge}\n`);
+          else res.end(challenge);
+          return;
         }
+
+        this.posts.push({ path: req.url, contentType: req.headers["content-type"], body: JSON.parse(body) });
         res.statusCode = req.url.startsWith("/gone/") ? 404 : 200;
         res.end("ok");
       });
@@ -173,6 +185,45 @@ async function testRefusedSubscriptions({ aliceConn }) {
   }
 
   pass("testRefusedSubscriptions");
+}
+
+async function testCallbackVerification({ aliceConn }) {
+  const kinds1 = { kinds: [1] };
+
+  // Nothing listens on port 1
+  const cases = [
+    ["doesn't echo the challenge", callbacks.url("/no-echo/1"), "didn't echo"],
+    ["adds a newline to the challenge", callbacks.url("/echo-newline/1"), "didn't echo"],
+    ["answers 404", callbacks.url("/echo-404/1"), "404"],
+    ["is unreachable", "http://127.0.0.1:1/x", "unreachable"],
+  ];
+
+  for (const [i, [what, callback, reason]] of cases.entries()) {
+    const ok = await publish(aliceConn, subscription(alice, `unverified-${i}`, { filters: [kinds1], callback }));
+    expect(
+      ok[2] === false && ok[3].startsWith("invalid:") && ok[3].includes(reason),
+      `a subscription whose callback ${what} must be refused with invalid: (${reason}), got: ${ok[3]}`,
+    );
+  }
+
+  const stored = await query(aliceConn, "unverified", { kinds: [30390], "#d": cases.map((_, i) => `unverified-${i}`) });
+  expect(stored.length === 0, "a subscription whose callback refused the challenge must not be stored");
+
+  await store(aliceConn, subscription(alice, "verified", { filters: [kinds1], callback: callbacks.url("/verified?token=abc"), created_at: now() - 10 }));
+  const current = await store(aliceConn, subscription(alice, "verified", { filters: [kinds1], callback: callbacks.url("/verified?token=abc") }));
+
+  const gets = callbacks.challenges.filter((c) => c.path === "/verified");
+  expect(gets.length === 2, `each subscription must be verified, got ${gets.length} GETs`);
+  expect(
+    gets.every((g) => g.query.startsWith("?token=abc&challenge=") && /^[0-9a-f]{64}$/.test(g.challenge)),
+    `the challenge must be appended to the callback's query, got ${gets.map((g) => g.query)}`,
+  );
+  expect(gets[0].challenge !== gets[1].challenge, "each challenge must be new");
+
+  await store(aliceConn, current);
+  expect(callbacks.challenges.filter((c) => c.path === "/verified").length === 2, "a subscription the relay already has must not be verified again");
+
+  pass("testCallbackVerification");
 }
 
 async function testPushesMatchingEvents({ aliceConn }) {
@@ -303,12 +354,50 @@ async function testSubscriptionLimit({ bobConn }) {
   pass("testSubscriptionLimit");
 }
 
+async function testIgnoreSelf({ aliceConn, bobConn }) {
+  const dms = { kinds: [1059], "#p": [alice.pub] };
+  await store(aliceConn, subscription(alice, "dm-all", { filters: [dms], callback: callbacks.url("/dm-all") }));
+  await store(aliceConn, subscription(alice, "dm-inbox", { filters: [dms], callback: callbacks.url("/dm-inbox"), extraTags: [["ignore_self"]] }));
+
+  // Bob can only send Alice a gift wrap while anyone can write
+  const wrapForAlice = () => sign(newUser(), { kind: 1059, tags: [["p", alice.pub]], content: "sealed" });
+  const bobCanWrite = async (expected) => {
+    const deadline = Date.now() + 3_000;
+    let ev, ok;
+    do {
+      await delay(100);
+      ev = wrapForAlice();
+      ok = await publish(bobConn, ev);
+    } while (ok[2] !== expected && Date.now() < deadline);
+    expect(ok[2] === expected, `bob's gift wrap for alice should be ${expected ? "stored" : "refused"}, got: ${ok[3]}`);
+    return ev;
+  };
+
+  writeRelayConfig({ allowPrivateAddresses: true }, { authorOnlyWrites: false });
+  const received = await bobCanWrite(true);
+  const selfCopy = await store(aliceConn, wrapForAlice());
+
+  await callbacks.waitFor("/dm-inbox", received.id);
+  await callbacks.waitFor("/dm-all", received.id);
+  await callbacks.waitFor("/dm-all", selfCopy.id);
+  await delay(300);
+  expect(
+    !callbacks.to("/dm-inbox").some((p) => p.body.id === selfCopy.id),
+    "with ignore_self, an event sent over a connection AUTHed as the subscription's author must not be pushed",
+  );
+
+  writeRelayConfig({ allowPrivateAddresses: true });
+  await bobCanWrite(false);
+
+  pass("testIgnoreSelf");
+}
+
 async function testPrivateAddresses({ aliceConn }) {
   // A host name passes the parser, so only the check before connecting can stop it
   const byName = `http://${os.hostname()}:${callbacks.server.address().port}/by-name`;
-  await store(aliceConn, subscription(alice, "by-name", { filters: [{ kinds: [1] }], callback: byName }));
+  const byNameOk = await publish(aliceConn, subscription(alice, "by-name", { filters: [{ kinds: [1] }], callback: byName }));
   const control = await store(aliceConn, sign(alice, { content: "reaches the host name" }));
-  const hostNameReachable = await callbacks.waitFor("/by-name", control.id).then(() => true, () => false);
+  const hostNameReachable = byNameOk[2] === true && (await callbacks.waitFor("/by-name", control.id).then(() => true, () => false));
   if (!hostNameReachable) console.log(`Skipping the host name check: ${os.hostname()} doesn't reach this machine`);
 
   writeRelayConfig({ allowPrivateAddresses: false });
@@ -335,7 +424,10 @@ async function testPrivateAddresses({ aliceConn }) {
   const note = await store(aliceConn, sign(alice, { content: "nobody should get this" }));
   await delay(1_000);
   expect(!callbacks.to("/notes").some((p) => p.body.id === note.id), "a stored loopback subscription must stop being called");
-  expect(callbacks.to("/hex").length === 0, "a numeric host for 127.0.0.1 must not be called");
+  expect(
+    callbacks.to("/hex").length === 0 && !callbacks.challenges.some((c) => c.path === "/hex"),
+    "a numeric host for 127.0.0.1 must not be called",
+  );
   expect(
     !callbacks.to("/by-name").some((p) => p.body.id === note.id),
     "a host name resolving to a private address must not be called",
@@ -352,7 +444,7 @@ async function testDisabled({ aliceConn }) {
   do {
     await delay(100);
     ok = await publish(aliceConn, subscription(alice, `disabled-${Date.now()}`, { filters: [{ kinds: [1] }], callback: "https://push.example.com/x" }));
-  } while (ok[2] === true && Date.now() < deadline);
+  } while (!ok[3].startsWith("blocked:") && Date.now() < deadline);
   expect(ok[2] === false && ok[3].startsWith("blocked:"), `with webhooks disabled, subscriptions must be blocked, got: ${ok[3]}`);
 
   const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { Accept: "application/nostr+json" } });
@@ -381,12 +473,14 @@ async function main() {
         const conns = { aliceConn: await connect(alice), bobConn: await connect(bob) };
         try {
           await testRefusedSubscriptions(conns);
+          await testCallbackVerification(conns);
           await testPushesMatchingEvents(conns);
           await testOnlyOwnEvents(conns);
           await testSubscriptionsAreNeverPushed(conns);
           await testReplacementKeepsPushing(conns);
           await testRemovedOn404(conns);
           await testSubscriptionLimit(conns);
+          await testIgnoreSelf(conns);
           await testPrivateAddresses(conns);
           await testDisabled(conns);
         } finally {

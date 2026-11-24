@@ -119,6 +119,23 @@ inline void checkCallbackUrl(const std::string &url) {
     if (!cfg().relay__webhooks__allowPrivateAddresses && isPrivateHost(host)) throw herr("callback must not point to a private address");
 }
 
+// NIP-9a: the callback must echo this challenge before its subscription is stored. Empty on failure.
+inline std::string challengeUrl(const std::string &callback, const std::string &challenge) {
+    std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> u(curl_url(), curl_url_cleanup);
+    auto param = "challenge=" + challenge;
+    char *url = nullptr;
+    std::string out;
+
+    if (u && curl_url_set(u.get(), CURLUPART_URL, callback.c_str(), 0) == CURLUE_OK
+          && curl_url_set(u.get(), CURLUPART_QUERY, param.c_str(), CURLU_APPENDQUERY) == CURLUE_OK
+          && curl_url_get(u.get(), CURLUPART_URL, &url, 0) == CURLUE_OK) {
+        out = url;
+    }
+
+    curl_free(url);
+    return out;
+}
+
 // For logs: callback URLs act as secrets, so only their host is shown
 inline std::string callbackHost(std::string_view url) {
     auto host = normalizeRelayUrl(url);
@@ -157,6 +174,7 @@ struct Subscription {
     std::string pubkey;
     std::string callback;
     bool includeEvent = false;
+    bool ignoreSelf = false;
     NostrFilterGroup filters;
     NostrFilterGroup ignore;
 };
@@ -196,6 +214,11 @@ inline Subscription parse(const tao::json::value &evJson) {
 
         if (name == "include_event") {
             sub.includeEvent = true;
+            continue;
+        }
+
+        if (name == "ignore_self") {
+            sub.ignoreSelf = true;
             continue;
         }
 

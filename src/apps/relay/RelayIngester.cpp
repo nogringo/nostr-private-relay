@@ -221,6 +221,8 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         }
     }
 
+    std::string webhookCallback;
+
     // NIP-9a: a subscription the relay won't fulfill is refused, with the reason
     if (packed.kind() == Webhooks::subscriptionKind) {
         if (!Webhooks::active()) {
@@ -228,7 +230,7 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
             return;
         }
 
-        Webhooks::parse(origJson);
+        webhookCallback = Webhooks::parse(origJson).callback;
 
         if (Webhooks::countOtherSubscriptions(txn, packed) >= cfg().relay__webhooks__maxSubscriptionsPerPubkey) {
             sendOKResponse(connId, to_hex(packed.id()), false, "blocked: too many webhook subscriptions for this pubkey");
@@ -246,7 +248,15 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         }
     }
 
-    output.emplace_back(MsgWriter{MsgWriter::AddEvent{connId, std::move(ipAddr), std::move(packedStr), std::move(jsonStr), authedPubkey}});
+    bool fromOwner = Webhooks::active() && ReadRestrictor::isOwnedBy(packed, sessionPubkeys(rsctx, connId));
+    MsgWriter::AddEvent addEvent{connId, std::move(ipAddr), std::move(packedStr), std::move(jsonStr), authedPubkey, fromOwner};
+
+    if (webhookCallback.size()) {
+        verifyWebhook(std::move(addEvent), std::move(webhookCallback));
+        return;
+    }
+
+    output.emplace_back(MsgWriter{std::move(addEvent)});
 }
 
 void RelayServer::ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint64_t connId, const tao::json::value &arr, bool countOnly, std::string &outSubIdStr) {

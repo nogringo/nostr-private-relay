@@ -1,5 +1,6 @@
 #include <atomic>
 #include <deque>
+#include <variant>
 
 #include <curl/curl.h>
 
@@ -13,6 +14,8 @@ namespace {
 
 const size_t maxConcurrentRequests = 64;
 const size_t maxQueuedRequests = 10'000;
+const size_t maxConcurrentVerifications = 16;
+const size_t maxQueuedVerifications = 1'000;
 
 struct StoredSubscription {
     std::string eventId;
@@ -28,8 +31,15 @@ struct Delivery {
     std::string body;
 };
 
+struct Verification {
+    MsgWriter::AddEvent event;
+    std::string callback;
+    std::string challenge;
+    std::string answer;
+};
+
 struct Transfer {
-    Delivery delivery;
+    std::variant<Delivery, Verification> job;
     curl_slist *headers = nullptr;
     bool blockedAddress = false;
 
@@ -51,15 +61,32 @@ size_t discardBody(char *, size_t size, size_t nmemb, void *) {
     return size * nmemb;
 }
 
+// Aborts once the answer is longer than the challenge
+size_t readAnswer(char *data, size_t size, size_t nmemb, void *userp) {
+    auto &verification = *static_cast<Verification *>(userp);
+    verification.answer.append(data, size * nmemb);
+    return verification.answer.size() <= verification.challenge.size() ? size * nmemb : 0;
+}
+
 }
 
 
 void RelayServer::runWebhooks() {
     setThreadName("Webhooks");
 
-    CURLM *multi = curl_multi_init();
-    if (!multi) throw herr("curl_multi_init failed");
-    uint64_t multiConfigVer = cfg().version();
+    CURLM *multi = nullptr;
+    uint64_t multiConfigVer = 0;
+
+    auto resetMulti = [&]{
+        std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+        if (multi) curl_multi_cleanup(multi);
+        multi = curl_multi_init();
+        webhooksInbox.multi = multi;
+        if (!multi) throw herr("curl_multi_init failed");
+        multiConfigVer = cfg().version();
+    };
+
+    resetMulti();
 
     std::atomic<bool> dbChanged = true;
 
@@ -75,6 +102,9 @@ void RelayServer::runWebhooks() {
     std::vector<std::pair<uint64_t, std::string>> pendingDeletions; // levId, event id
     bool deletionsDue = false;
     std::deque<Delivery> queue;
+    std::deque<Verification> verifications;
+    flat_hash_map<std::string, uint64_t> verificationsByPubkey; // queued or running
+    size_t runningVerifications = 0;
     flat_hash_map<CURL*, std::unique_ptr<Transfer>> transfers;
     uint64_t currEventId = MAX_U64;
     uint64_t configVer = 0;
@@ -143,7 +173,21 @@ void RelayServer::runWebhooks() {
         }
     };
 
-    auto collectDeliveries = [&](lmdb::txn &txn, defaultDb::environment::View_Event &ev){
+    // The events up to this levId that came over a connection AUTHed as their owner
+    auto takeOwnerWrites = [&](uint64_t upTo){
+        flat_hash_set<uint64_t> taken;
+        std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+
+        erase_if(webhooksInbox.ownerWrites, [&](uint64_t levId){
+            if (levId > upTo) return false;
+            taken.insert(levId);
+            return true;
+        });
+
+        return taken;
+    };
+
+    auto collectDeliveries = [&](lmdb::txn &txn, defaultDb::environment::View_Event &ev, const flat_hash_set<uint64_t> &ownerWrites){
         PackedEventView packed(ev.buf);
 
         // NIP-9a: subscriptions are only served to their author, and their callbacks are secrets
@@ -155,6 +199,7 @@ void RelayServer::runWebhooks() {
         auto found = subsByOwner.find(std::string(owner));
         if (found == subsByOwner.end()) return;
 
+        bool fromOwner = ownerWrites.contains(ev.primaryKeyId);
         std::optional<bool> ownerRefused;
         std::string eventIdJson;
 
@@ -162,6 +207,7 @@ void RelayServer::runWebhooks() {
             const auto &sub = *stored->sub;
 
             if (stored->gone || ev.primaryKeyId <= stored->since) continue;
+            if (sub.ignoreSelf && fromOwner) continue;
             if (!sub.filters.doesMatch(packed) || sub.ignore.doesMatch(packed)) continue;
 
             if (!ownerRefused) ownerRefused = AccessControl::refusal(txn, owner).size() > 0;
@@ -183,6 +229,59 @@ void RelayServer::runWebhooks() {
 
             queue.push_back(Delivery{ subLevId, sub.callback, std::move(body) });
         }
+    };
+
+    auto takeVerifications = [&]{
+        std::deque<WebhookVerification> arrived;
+
+        {
+            std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+            arrived.swap(webhooksInbox.verifications);
+        }
+
+        for (auto &v : arrived) {
+            PackedEventView packed(v.event.packedStr);
+            std::string pubkey(packed.pubkey());
+            auto &pending = verificationsByPubkey[pubkey];
+
+            if (pending >= cfg().relay__webhooks__maxSubscriptionsPerPubkey || verifications.size() >= maxQueuedVerifications) {
+                sendOKResponse(v.event.connId, to_hex(packed.id()), false, "rate-limited: too many webhook subscriptions waiting for their callback");
+                if (!pending) verificationsByPubkey.erase(pubkey);
+                continue;
+            }
+
+            pending++;
+            verifications.push_back(Verification{ std::move(v.event), std::move(v.callback), randomToken() });
+        }
+    };
+
+    auto finishVerification = [&](Verification &v, CURLcode result, long status, bool blockedAddress){
+        PackedEventView packed(v.event.packedStr);
+        std::string pubkey(packed.pubkey());
+
+        runningVerifications--;
+        if (--verificationsByPubkey[pubkey] == 0) verificationsByPubkey.erase(pubkey);
+
+        // A longer answer aborts the transfer, which is no reason to call the callback unreachable
+        bool longerAnswer = v.answer.size() > v.challenge.size();
+        std::string refusal;
+
+        if (result != CURLE_OK && !longerAnswer) {
+            refusal = std::string("callback unreachable: ") + (blockedAddress ? "it resolves to a private address" : curl_easy_strerror(result));
+        } else if (status < 200 || status >= 300) {
+            refusal = "callback answered " + std::to_string(status) + " to the challenge";
+        } else if (v.answer != v.challenge) {
+            refusal = "callback didn't echo the challenge";
+        }
+
+        if (refusal.size()) {
+            LI << "Refused a webhook subscription to " << Webhooks::callbackHost(v.callback) << ": " << refusal;
+            sendOKResponse(v.event.connId, to_hex(packed.id()), false, "invalid: " + refusal);
+            return;
+        }
+
+        auto connId = v.event.connId;
+        tpWriter.dispatch(connId, MsgWriter{std::move(v.event)});
     };
 
     // Deleting the most recent event would let the next one reuse its levId, which monitors would never see
@@ -210,34 +309,66 @@ void RelayServer::runWebhooks() {
         pendingDeletions = std::move(stillPending);
     };
 
+    auto newEasy = [&](Transfer &transfer, const std::string &url) -> CURL* {
+        CURL *easy = curl_easy_init();
+        if (!easy) {
+            LE << "curl_easy_init failed";
+            return nullptr;
+        }
+
+        curl_easy_setopt(easy, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(easy, CURLOPT_USERAGENT, userAgent.c_str());
+        curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, (long)cfg().relay__webhooks__timeoutSeconds * 1000);
+        curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(easy, CURLOPT_PROXY, ""); // a proxy would connect to private addresses for us
+        curl_easy_setopt(easy, CURLOPT_OPENSOCKETFUNCTION, openSocket);
+        curl_easy_setopt(easy, CURLOPT_OPENSOCKETDATA, &transfer);
+
+        return easy;
+    };
+
     auto startTransfers = [&]{
-        while (transfers.size() < maxConcurrentRequests && queue.size()) {
+        // Verifications go first: their client is waiting for an OK
+        while (runningVerifications < maxConcurrentVerifications && verifications.size()) {
             auto transfer = std::make_unique<Transfer>();
-            transfer->delivery = std::move(queue.front());
-            queue.pop_front();
+            transfer->job = std::move(verifications.front());
+            verifications.pop_front();
+            runningVerifications++;
 
-            auto stored = subs.find(transfer->delivery.subLevId);
-            if (stored != subs.end() && stored->second.gone) continue;
+            auto &verification = std::get<Verification>(transfer->job);
+            auto url = Webhooks::challengeUrl(verification.callback, verification.challenge);
+            CURL *easy = url.size() ? newEasy(*transfer, url) : nullptr;
 
-            CURL *easy = curl_easy_init();
             if (!easy) {
-                LE << "curl_easy_init failed";
+                finishVerification(verification, CURLE_FAILED_INIT, 0, false);
                 continue;
             }
+
+            curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, readAnswer);
+            curl_easy_setopt(easy, CURLOPT_WRITEDATA, &verification);
+
+            curl_multi_add_handle(multi, easy);
+            transfers.emplace(easy, std::move(transfer));
+        }
+
+        while (transfers.size() - runningVerifications < maxConcurrentRequests && queue.size()) {
+            auto transfer = std::make_unique<Transfer>();
+            transfer->job = std::move(queue.front());
+            queue.pop_front();
+
+            auto &delivery = std::get<Delivery>(transfer->job);
+            auto stored = subs.find(delivery.subLevId);
+            if (stored != subs.end() && stored->second.gone) continue;
+
+            CURL *easy = newEasy(*transfer, delivery.callback);
+            if (!easy) continue;
 
             transfer->headers = curl_slist_append(transfer->headers, "Content-Type: application/json");
             transfer->headers = curl_slist_append(transfer->headers, "Expect:");
 
-            curl_easy_setopt(easy, CURLOPT_URL, transfer->delivery.callback.c_str());
-            curl_easy_setopt(easy, CURLOPT_POSTFIELDS, transfer->delivery.body.data());
-            curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)transfer->delivery.body.size());
+            curl_easy_setopt(easy, CURLOPT_POSTFIELDS, delivery.body.data());
+            curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)delivery.body.size());
             curl_easy_setopt(easy, CURLOPT_HTTPHEADER, transfer->headers);
-            curl_easy_setopt(easy, CURLOPT_USERAGENT, userAgent.c_str());
-            curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, (long)cfg().relay__webhooks__timeoutSeconds * 1000);
-            curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
-            curl_easy_setopt(easy, CURLOPT_PROXY, ""); // a proxy would connect to private addresses for us
-            curl_easy_setopt(easy, CURLOPT_OPENSOCKETFUNCTION, openSocket);
-            curl_easy_setopt(easy, CURLOPT_OPENSOCKETDATA, transfer.get());
             curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, discardBody);
 
             curl_multi_add_handle(multi, easy);
@@ -264,13 +395,20 @@ void RelayServer::runWebhooks() {
             transfers.erase(found);
 
             auto &transfer = *transferOwner;
-            auto host = Webhooks::callbackHost(transfer.delivery.callback);
+
+            if (auto verification = std::get_if<Verification>(&transfer.job)) {
+                finishVerification(*verification, result, status, transfer.blockedAddress);
+                continue;
+            }
+
+            auto &delivery = std::get<Delivery>(transfer.job);
+            auto host = Webhooks::callbackHost(delivery.callback);
 
             if (result != CURLE_OK) {
                 LI << "Webhook POST to " << host << " failed: " << (transfer.blockedAddress ? "callback resolves to a private address" : curl_easy_strerror(result));
             } else if (status == 404) {
                 // NIP-9a: the push server no longer knows this subscription
-                auto stored = subs.find(transfer.delivery.subLevId);
+                auto stored = subs.find(delivery.subLevId);
 
                 if (stored != subs.end() && !stored->second.gone) {
                     stored->second.gone = true;
@@ -284,6 +422,8 @@ void RelayServer::runWebhooks() {
     };
 
     while (1) {
+        takeVerifications();
+
         if (dbChanged.exchange(false)) {
             deletionsDue = pendingDeletions.size() > 0;
 
@@ -292,12 +432,14 @@ void RelayServer::runWebhooks() {
                 uint64_t latestEventId = getMostRecentLevId(txn);
                 if (currEventId > latestEventId) currEventId = latestEventId;
 
+                auto ownerWrites = takeOwnerWrites(latestEventId);
+
                 if (Webhooks::active()) {
                     refreshSubscriptions(txn);
 
                     if (subsByOwner.size()) {
                         env.foreach_Event(txn, [&](auto &ev){
-                            collectDeliveries(txn, ev);
+                            collectDeliveries(txn, ev, ownerWrites);
                             return true;
                         }, false, currEventId + 1);
                     }
@@ -313,10 +455,7 @@ void RelayServer::runWebhooks() {
         bool configChanged = multiConfigVer != cfg().version();
 
         if (configChanged && transfers.empty()) {
-            curl_multi_cleanup(multi);
-            multi = curl_multi_init();
-            if (!multi) throw herr("curl_multi_init failed");
-            multiConfigVer = cfg().version();
+            resetMulti();
             configChanged = false;
         }
 

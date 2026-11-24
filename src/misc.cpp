@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <string>
 
+#include <openssl/rand.h>
 #include <openssl/sha.h>
 
 #include "golpe.h"
@@ -127,6 +128,12 @@ void exitOnSigPipe() {
     if (sigaction(SIGPIPE, &act, nullptr)) throw herr("couldn't run sigaction(): ", strerror(errno));
 }
 
+
+std::string randomToken() {
+    unsigned char buf[32];
+    if (RAND_bytes(buf, sizeof(buf)) != 1) throw herr("unable to generate a token");
+    return to_hex(std::string_view((char*)buf, sizeof(buf)));
+}
 
 void parseCommaSeparatedKinds(std::string_view str, flat_hash_set<uint64_t> &out) {
     out.clear();

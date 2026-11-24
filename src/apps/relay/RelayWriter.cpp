@@ -62,10 +62,23 @@ void RelayServer::runWriter(ThreadPool<MsgWriter>::Thread &thr) {
 
         // Do write
 
+        std::vector<uint64_t> ownerWrites;
+
         try {
             auto t0 = std::chrono::steady_clock::now();
             auto txn = env.txn_rw();
             writeEvents(txn, neFilterCache, newEvents);
+
+            // Before the commit, so the webhooks thread never sees these events without their origin
+            for (auto &newEvent : newEvents) {
+                if (newEvent.status == EventWriteStatus::Written && static_cast<MsgWriter::AddEvent*>(newEvent.userData)->fromOwner) ownerWrites.push_back(newEvent.levId);
+            }
+
+            if (ownerWrites.size()) {
+                std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+                webhooksInbox.ownerWrites.insert(ownerWrites.begin(), ownerWrites.end());
+            }
+
             txn.commit();
             auto t1 = std::chrono::steady_clock::now();
             auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -73,6 +86,12 @@ void RelayServer::runWriter(ThreadPool<MsgWriter>::Thread &thr) {
             PrometheusMetrics::getInstance().lastWriteBatchSize.set(newEvents.size());
         } catch (std::exception &e) {
             LE << "Error writing " << newEvents.size() << " events: " << e.what();
+
+            // The next write reuses these levIds
+            if (ownerWrites.size()) {
+                std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
+                for (auto levId : ownerWrites) webhooksInbox.ownerWrites.erase(levId);
+            }
 
             for (auto &newEvent : newEvents) {
                 PackedEventView packed(newEvent.packedStr);

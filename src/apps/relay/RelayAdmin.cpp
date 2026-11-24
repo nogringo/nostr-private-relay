@@ -1,7 +1,6 @@
 #include <cstdlib>
 #include <ctime>
 #include <sys/stat.h>
-#include <openssl/rand.h>
 
 #include "RelayServer.h"
 #include "RelayUrl.h"
@@ -234,12 +233,6 @@ BackupFile snapshotDb() {
     file.filename = backupFilename();
 
     return file;
-}
-
-std::string randomToken() {
-    unsigned char buf[32];
-    if (RAND_bytes(buf, sizeof(buf)) != 1) throw herr("unable to generate a token");
-    return to_hex(std::string_view((char*)buf, sizeof(buf)));
 }
 
 // Stores the events of these JSONL lines under the same access lists as publishing them

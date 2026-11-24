@@ -8,7 +8,7 @@ A private storage relay for the relay list of [NIP-37](https://github.com/nostr-
 * **Several accounts per connection.** A client can AUTH as several pubkeys on the same connection and see all their events, as NIP-42 requires.
 * **Efficient sync.** [NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md) negentropy, limited to your own events.
 * **Deletion that sticks.** [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletions by id or address, [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts), and [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) requests to vanish: a request naming this relay (or `ALL_RELAYS`) is accepted without AUTH, erases everything from the pubkey and every gift wrap addressed to it, and keeps the erased events from being published again.
-* **Webhooks.** [NIP-9a](https://github.com/nostr-protocol/nips/pull/2194) `kind:30390` subscriptions: for each new event of yours that matches one, the relay POSTs its id (and the event, if asked) to the subscription's callback, so a push server can notify your devices without reading the relay as you. See [Webhooks](#webhooks).
+* **Webhooks.** [NIP-9a](https://github.com/nostr-protocol/nips/pull/2194) `kind:30390` subscriptions: for each new event of yours that matches one, the relay POSTs its id (and the event, if asked) to the subscription's callback, once that callback has confirmed it by echoing a challenge, so a push server can notify your devices without reading the relay as you. See [Webhooks](#webhooks).
 * **Room for any encrypted payload.** The default `events.maxEventSize` fits the largest NIP-44 ciphertext, so a long draft is never rejected for its size.
 * **Clients know what to expect.** The AUTH challenge is sent as soon as a client connects, `CLOSED`/`OK` messages use the machine-readable `auth-required:` and `restricted:` prefixes, and NIP-11 lists NIPs 37, 42, 62, 77 and `9a` with `auth_required` and `restricted_writes` set.
 * **An admin page.** [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) management and a `/admin` page show how much space each pubkey uses, ban or allow pubkeys, block IPs, erase a pubkey's data, edit the relay info, download a backup and import events from a JSONL file. The page shows sizes and counts, never what is stored, but a backup holds every event: only list admins you would trust with the server.
@@ -77,9 +77,13 @@ A client registers a push server's callback by storing a `kind:30390` event ([NI
       ]
     }
 
+Before storing a subscription, the relay sends its callback a `GET` with a random `challenge` query parameter appended, and stores the subscription only if the answer is a `2xx` whose body is exactly that challenge. The `OK` waits for this answer, up to `timeoutSeconds`. A pubkey can have `maxSubscriptionsPerPubkey` subscriptions waiting for their callback at once: more are refused with `rate-limited:`. Subscriptions imported from the admin page or with `strfry import` are not verified.
+
 For each new event its author owns (a gift wrap counts for its recipient) that matches a `filter` tag and no `ignore` tag, the relay POSTs `{"id": "<event id>", "relay": "wss://private.example.com/"}` to the callback, with `Content-Type: application/json`. With an `include_event` tag, the body also holds the whole `event`. The subscription itself is stored like any event: only its author can read it, a newer one with the same `d` tag replaces it, and NIP-09 or NIP-40 delete it. Subscriptions are never pushed, since their callbacks act as secrets.
 
-The relay answers `OK false` with `invalid:` to a subscription whose `relay` tag doesn't name `relay.auth.serviceUrl`, without a valid `filter`, or without exactly one `callback`. The callback must be `https://` and can't point to a loopback, private or link-local address. Host names are checked again once resolved, before each connection. A callback answering `404` deletes its subscription. Other errors are only logged, and nothing is retried.
+With an `ignore_self` tag, the relay skips the events it received over a connection authenticated as the subscription's author. With `authorOnlyWrites` on, that is every event sent over a websocket apart from requests to vanish, so the tag is meant for `authorOnlyWrites = false`: there, a NIP-17 inbox subscription would otherwise push the copy of every message the user sends.
+
+The relay answers `OK false` with `invalid:` to a subscription whose `relay` tag doesn't name `relay.auth.serviceUrl`, without a valid `filter`, without exactly one `callback`, or whose callback doesn't echo the challenge. The callback must be `https://` and can't point to a loopback, private or link-local address. Host names are checked again once resolved, before each connection. A callback answering `404` to a POST deletes its subscription. Other errors are only logged, and nothing is retried.
 
 These options are under `relay.webhooks`:
 
@@ -94,7 +98,7 @@ These options are under `relay.webhooks`:
 ### Limits
 
 * This is not a DM inbox. Someone sending you a gift wrap can't AUTH as you, so the relay refuses it. Keep your `kind:10050` relays separate.
-* Anyone who stores a subscription can make the relay POST to any public URL: one POST per matching event they store. The relay doesn't check that the callback agreed to receive them.
+* Anyone who can store events can make the relay send a `GET` with a `challenge` to any public URL, one per subscription they publish. Only a callback that echoes it receives POSTs.
 * `strfry sync`, `strfry stream` and `strfry router` don't AUTH, so they can't read from or write to a relay in private mode over the network. Back up the server from the admin page, or with `strfry export`.
 
 The rest of this document is strfry's own documentation.

@@ -12,7 +12,7 @@ export function config(
   relayDb,
   relayPort = 40553,
   restrictReadToInvolvedPubkey = true,
-  { privateStorage = false, maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {},
+  { privateStorage = false, authorOnlyWrites = privateStorage, maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {},
 ) {
   const webhookOptions = Object.entries(webhooks)
     .map(([k, v]) => `\n    ${k} = ${v}`)
@@ -31,7 +31,7 @@ relay {
     enabled = true
     serviceUrl = "wss://relay.test"
     authorOnlyReads = ${privateStorage}
-    authorOnlyWrites = ${privateStorage}
+    authorOnlyWrites = ${authorOnlyWrites}
     maxPubkeysPerConnection = ${maxPubkeysPerConnection}
     restrictedReadKinds = "4, 1059"
     restrictReadToInvolvedPubkey = ${restrictReadToInvolvedPubkey ? "true" : "false"}
