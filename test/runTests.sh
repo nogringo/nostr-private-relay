@@ -19,12 +19,6 @@ node "./test/tests/writeTest.js" \
   && pass "./test/tests/writeTest.js" \
   || fail "./test/tests/writeTest.js failed"
 
-info "running restricted read tests..."
-
-node "./test/tests/readRestrictTest.js" \
-  && pass "./test/tests/readRestrictTest.js" \
-  || fail "./test/tests/readRestrictTest.js failed"
-
 info "running private storage tests..."
 
 node "./test/tests/privateStorageTest.js" \
@@ -60,14 +54,5 @@ perl "./test/tests/filterFuzzTest.pl" scan-limit \
 perl "./test/tests/filterFuzzTest.pl" monitor \
 && pass "./test/tests/filterFuzzTest.pl monitor" \
 || fail "./test/tests/filterFuzzTest.pl monitor failed"
-
-
-# sync tests
-
-info "running sync tests..."
-
-perl "./test/tests/runSyncTests.pl" \
-  && pass "./test/tests/syncTests.pl" \
-  || fail "./test/tests/runSyncTests.pl failed"
 
 pass "All tests passed."

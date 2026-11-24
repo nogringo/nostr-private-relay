@@ -15,34 +15,19 @@ config:
     desc: "HTTP header that contains the client's real IP, before reverse proxying (ie x-real-ip) (MUST be all lower-case)"
     default: ""
 
-  - name: relay__auth__enabled
-    desc: "Enable NIP-42 authentication"
-    default: true
   - name: relay__auth__serviceUrl
-    desc: "External relay URL (beginning with wss://). Required in order to validate challenge responses, so private storage (authorOnlyReads/authorOnlyWrites) doesn't work without it."
+    desc: "External relay URL (beginning with wss://). Required in order to validate challenge responses: without it, nobody can read or write."
     default: ""
-  - name: relay__auth__authorOnlyReads
-    desc: "NIP-37 private storage: REQ, COUNT and NEG-OPEN require NIP-42 AUTH, and only return events authored by an authenticated pubkey, or gift wraps (kinds 1059/21059) addressed to one. Overrides restrictedReadKinds."
-    default: true
-  - name: relay__auth__authorOnlyWrites
-    desc: "Only accept events authored by an authenticated pubkey, or gift wraps addressed to one, whose signer can't delete them. NIP-62 requests to vanish are accepted without AUTH."
-    default: true
   - name: relay__auth__maxPubkeysPerConnection
     desc: "Maximum number of pubkeys a single connection can AUTH as (NIP-42 allows several)"
     default: 10
-  - name: relay__auth__restrictedReadKinds
-    desc: "Comma-separated list of event kinds that require NIP-42 AUTH to read via REQ/COUNT/NEG-OPEN, when authorOnlyReads is false. Example for DMs: '4,1059'."
-    default: "4, 1059"
-  - name: relay__auth__restrictReadToInvolvedPubkey
-    desc: "When a filter matches restrictedReadKinds, also require the authenticated pubkey to appear in its 'authors' or '#p' set."
-    default: true
 
   - name: relay__admin__pubkeys
     desc: "NIP-86 relay management: comma-separated pubkeys (npub or hex) allowed to use the management API and the /admin page"
     default: ""
 
   - name: relay__webhooks__enabled
-    desc: "NIP-9a: POST the events matching a kind 30390 subscription to its callback URL. Needs authorOnlyReads and serviceUrl."
+    desc: "NIP-9a: POST the events matching a kind 30390 subscription to its callback URL. Needs serviceUrl."
     default: true
   - name: relay__webhooks__maxSubscriptionsPerPubkey
     desc: "Maximum number of kind 30390 subscriptions a pubkey can store"

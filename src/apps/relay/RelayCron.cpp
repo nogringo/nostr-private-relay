@@ -20,6 +20,7 @@ void RelayServer::runCron() {
             auto txn = env.txn_ro();
 
             auto mostRecent = getMostRecentLevId(txn);
+            auto mostRecentUpload = getMostRecentUploadId(txn);
             uint64_t now = hoytech::curr_time_s();
             uint64_t ephemeralCutoff = now - cfg().events__ephemeralEventsLifetimeSeconds;
 
@@ -28,7 +29,7 @@ void RelayServer::runCron() {
                 auto levId =  lmdb::from_sv<uint64_t>(v);
 
                 if (expiration > now) return false;
-                if (levId == mostRecent) return true; // don't delete because it could cause levId re-use
+                if (levId == mostRecent || holdsMostRecentUpload(txn, levId, mostRecentUpload)) return true; // don't delete because it could cause levId re-use
 
                 if (expiration == 1) { // Ephemeral event
                     auto view = env.lookup_Event(txn, levId);

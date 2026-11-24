@@ -8,12 +8,7 @@ import ids from "./dummyIds.json" with { type: "json" };
 
 let ts = 1_700_000_000;
 
-export function config(
-  relayDb,
-  relayPort = 40553,
-  restrictReadToInvolvedPubkey = true,
-  { privateStorage = false, authorOnlyWrites = privateStorage, maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {},
-) {
+export function config(relayDb, relayPort = 40553, { maxPubkeysPerConnection = 10, adminPubkeys = "", webhooks = {} } = {}) {
   const webhookOptions = Object.entries(webhooks)
     .map(([k, v]) => `\n    ${k} = ${v}`)
     .join("");
@@ -28,13 +23,8 @@ relay {
   autoPingSeconds = 0
 
   auth {
-    enabled = true
     serviceUrl = "wss://relay.test"
-    authorOnlyReads = ${privateStorage}
-    authorOnlyWrites = ${authorOnlyWrites}
     maxPubkeysPerConnection = ${maxPubkeysPerConnection}
-    restrictedReadKinds = "4, 1059"
-    restrictReadToInvolvedPubkey = ${restrictReadToInvolvedPubkey ? "true" : "false"}
   }
 
   admin {

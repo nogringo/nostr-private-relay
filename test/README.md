@@ -6,11 +6,7 @@ Tests should be run from the *root* of the project.
 
     node test/writeTest.js
 
-## Restricted read tests (REQ/COUNT/negentropy + ReadRestrictor logic):
-
-    node test/readRestrictTest.js
-
-## Private storage tests (NIP-37 author-only reads and writes, NIP-42 multi-pubkey AUTH, NIP-62 vanish):
+## Private storage tests (NIP-37 per-uploader storage, NIP-42 multi-pubkey AUTH, NIP-62 vanish):
 
     node test/tests/privateStorageTest.js
 

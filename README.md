@@ -1,14 +1,16 @@
 # nostr-private-relay
 
-A private storage relay for the relay list of [NIP-37](https://github.com/nostr-protocol/nips/blob/master/37.md) (`kind:10013`): drafts, checkpoints, and any other private event you want kept on a relay that nobody else can read. It is a fork of [strfry](https://github.com/hoytech/strfry), and it serves many users, each one isolated from the others.
+A private storage relay for the relay list of [NIP-37](https://openspecs.uid.ovh/spec/npub1kg4sdvz3l4fr99n2jdz2vdxe2mpacva87hkdetv76ywacsfq5leqquw5te/nip-37) (`kind:10013`): drafts, checkpoints, and any other private event you want kept on a relay that nobody else can read. It is a fork of [strfry](https://github.com/hoytech/strfry), and it serves many users, each one isolated from the others.
 
-* **Only you can read your events.** Every `REQ`, `COUNT` and `NEG-OPEN` needs [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) AUTH, and the relay narrows each filter down to the authenticated pubkeys before running it. A filter that only asks for other users' events is closed with `restricted:`. Live subscriptions and negentropy follow the same rule. This also hides from other users the metadata that encryption leaves visible: kinds, `d` tags, timestamps.
-* **Only you can write your events.** An event is accepted from its authenticated author, so nobody can fill your storage with copies of events they found elsewhere.
-* **Gift wraps belong to their recipient.** A `kind:1059` (or `21059`) is signed by a throwaway key, so it is owned by the pubkey in its `p` tag, not by its signer: the recipient stores it, reads it, and deletes it. A wrap must have exactly one `p` tag ([NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md)).
-* **Several accounts per connection.** A client can AUTH as several pubkeys on the same connection and see all their events, as NIP-42 requires.
-* **Efficient sync.** [NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md) negentropy, limited to your own events.
-* **Deletion that sticks.** [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletions by id or address, [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts), and [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) requests to vanish: a request naming this relay (or `ALL_RELAYS`) is accepted without AUTH, erases everything from the pubkey and every gift wrap addressed to it, and keeps the erased events from being published again.
-* **Webhooks.** [NIP-9a](https://github.com/nostr-protocol/nips/pull/2194) `kind:30390` subscriptions: for each new event of yours that matches one, the relay POSTs its id (and the event, if asked) to the subscription's callback, once that callback has confirmed it by echoing a challenge, so a push server can notify your devices without reading the relay as you. See [Webhooks](#webhooks).
+* **Only you can read what you stored.** As NIP-37 recommends, every event is only served to the authenticated user who uploaded it, whoever signed it. Every `REQ`, `COUNT` and `NEG-OPEN` needs [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) AUTH and only sees what the authenticated pubkeys stored, so a filter on other authors returns the copies of their events you kept. Live subscriptions and negentropy follow the same rule. This also hides from other users the metadata that encryption leaves visible: kinds, `d` tags, timestamps, and whether an event is stored at all.
+* **Each pubkey has its own storage.** Every event needs AUTH, apart from requests to vanish, and goes into the storage of the pubkey that sends it: your own events, the gift wraps addressed to you, or copies of anyone else's events. What other users store never shows up in yours, and storing an event someone else already stored tells you nothing about it.
+* **Gift wraps.** A `kind:1059` (or `21059`) is signed by a throwaway key, so its recipient, the pubkey in its `p` tag, can delete it, and its signer never can. A wrap must have exactly one `p` tag ([NIP-59](https://github.com/nostr-protocol/nips/blob/master/59.md)).
+* **Several accounts per connection.** A client can AUTH as several pubkeys on the same connection and see what all of them stored, as NIP-42 requires. An event sent over such a connection goes to its owner (its author, or the recipient of a gift wrap) when the connection authenticated as them, otherwise to the first pubkey it authenticated as.
+* **Efficient sync.** [NIP-77](https://github.com/nostr-protocol/nips/blob/master/77.md) negentropy, limited to what you stored.
+* **Replacement and deletion, storage by storage.** A newer version of a replaceable event only replaces the version in its uploader's storage. A [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) deletion, by id or address, removes the event from the storage of the pubkey that sends it, and never from the copies other pubkeys keep: an author deleting their event, or a recipient deleting a gift wrap. A pubkey can also delete its copy of anyone's event with a deletion request it signs. A deleted event can't be stored again in that storage.
+* **Requests to vanish erase your own storage.** A [NIP-62](https://github.com/nostr-protocol/nips/blob/master/62.md) request to vanish naming this relay (or `ALL_RELAYS`) is accepted without AUTH and erases every event older than the request from its pubkey's storage, gift wraps included. What other pubkeys stored stays, even their copies of its events. Its storage then refuses any event older than the request.
+* **Expiration applies everywhere.** [NIP-40](https://github.com/nostr-protocol/nips/blob/master/40.md) expiration (which NIP-37 recommends on drafts) deletes the event from every storage.
+* **Webhooks.** [NIP-9a](https://github.com/nostr-protocol/nips/pull/2194) `kind:30390` subscriptions: for each new event you store that matches one, the relay POSTs its id (and the event, if asked) to the subscription's callback, once that callback has confirmed it by echoing a challenge, so a push server can notify your devices without reading the relay as you. See [Webhooks](#webhooks).
 * **Room for any encrypted payload.** The default `events.maxEventSize` fits the largest NIP-44 ciphertext, so a long draft is never rejected for its size.
 * **Clients know what to expect.** The AUTH challenge is sent as soon as a client connects, `CLOSED`/`OK` messages use the machine-readable `auth-required:` and `restricted:` prefixes, and NIP-11 lists NIPs 37, 42, 62, 77 and `9a` with `auth_required` and `restricted_writes` set.
 * **An admin page.** [NIP-86](https://github.com/nostr-protocol/nips/blob/master/86.md) management and a `/admin` page show how much space each pubkey uses, ban or allow pubkeys, block IPs, erase a pubkey's data, edit the relay info, download a backup and import events from a JSONL file. The page shows sizes and counts, never what is stored, but a backup holds every event: only list admins you would trust with the server.
@@ -23,15 +25,9 @@ Build and run it like strfry (see below), and set the public URL of the relay. W
         }
     }
 
-These options control private storage, all under `relay.auth`:
+Private storage can't be turned off: this relay only does NIP-37. `relay.auth.maxPubkeysPerConnection` (`10` by default) sets how many pubkeys one connection can AUTH as. The `enabled`, `authorOnlyReads`, `authorOnlyWrites`, `restrictedReadKinds` and `restrictReadToInvolvedPubkey` options of earlier versions are gone: a config file that still sets them starts normally and ignores them.
 
-| Option | Default | |
-| --- | --- | --- |
-| `authorOnlyReads` | `true` | Serve every event to its owner only |
-| `authorOnlyWrites` | `true` | Accept every event from its authenticated owner only |
-| `maxPubkeysPerConnection` | `10` | How many pubkeys one connection can AUTH as |
-
-Set `authorOnlyReads` and `authorOnlyWrites` to `false` to get the behaviour of a regular strfry relay.
+The relay records who uploaded each event in its DB, whose version goes from 3 to 4. The first start of this version upgrades an existing DB in place, recording each event as stored by its owner (its author, or the recipient of a gift wrap). Older versions refuse to open the upgraded DB.
 
 ### Administration
 
@@ -47,12 +43,12 @@ The page talks to the relay through [NIP-86](https://github.com/nostr-protocol/n
 
 | Method | Params | |
 | --- | --- | --- |
-| `banpubkey`, `unbanpubkey`, `listbannedpubkeys` | `[pubkey, reason?]` | A banned pubkey can't AUTH, and can't store events even on a connection it already authenticated (which can still read its own events until it closes). It can still send a request to vanish. |
+| `banpubkey`, `unbanpubkey`, `listbannedpubkeys` | `[pubkey, reason?]` | A banned pubkey can't AUTH, and can't store events even on a connection it already authenticated (which can still read what it stored until it closes). It can still send a request to vanish. Other pubkeys can still store copies of its events. |
 | `allowpubkey`, `unallowpubkey`, `listallowedpubkeys` | `[pubkey, reason?]` | While the allow list has at least one pubkey, only allowed pubkeys and admins can AUTH and store events. |
 | `blockip`, `unblockip`, `listblockedips` | `[ip, reason?]` | A blocked IP can't connect, and its open connections are closed. Behind a reverse proxy, set `relay.realIpHeader`. |
 | `changerelayname`, `changerelaydescription`, `changerelayicon` | `[value]` | Overrides `relay.info` in NIP-11 and on the home page. An empty value goes back to the config. |
-| `stats` | `[limit?]` | Events, storage, users and connections, with the `limit` pubkeys (100 by default) using the most storage. A gift wrap counts for its recipient. It reads the whole DB. |
-| `erasepubkey` | `[pubkey]` | Deletes everything a request to vanish would: the events the pubkey signed and the gift wraps addressed to it. Returns how many were deleted. |
+| `stats` | `[limit?]` | Events, storage, users and connections, with the `limit` pubkeys (100 by default) using the most storage. An event counts for each pubkey that stored it. It reads the whole DB. |
+| `erasepubkey` | `[pubkey]` | Deletes everything a request to vanish would: everything the pubkey stored, and nothing other pubkeys stored. Returns how many events left its storage. |
 | `backup` | `[]` | Makes a compacted copy of the DB, like `strfry compact`, and returns a token. `GET /admin/backup?token=<token>` downloads it, once, within 60 seconds. |
 | `import` | `[]` | Returns a token for `POST /admin/import?token=<token>`, whose body is JSONL lines, up to 1 MiB per request. Each request answers `{"result": {"lines", "added", "skipped", "refused", "invalid", "errors"}}`, where `errors` gives up to 5 line numbers with their reason. The token lasts until 60 seconds after its last request. |
 
@@ -60,7 +56,7 @@ Pubkeys can be given in hex or as an npub. These lists and settings are stored i
 
 A backup is the whole LMDB file: the events, the lists above and the relay info. The copy is made while the relay keeps running, in a temporary file next to `data.mdb` that takes disk space until it is downloaded or its 60 seconds are up. To restore it, stop strfry, put the file in place of `data.mdb` in the `db` directory, and start strfry again. It needs a strfry with the same DB version (see [DB Compaction](#db-compaction)). `strfry export` can also read the events from it.
 
-An import checks every signature but not the timestamps, so old events go in. It follows the access lists: it refuses the events of banned pubkeys, or of pubkeys off the allow list while it is on, and in private mode the gift wraps without a single `p` tag. Deletion requests and requests to vanish in the file apply. The admin page sends the file in 512 KiB slices cut after a newline, which fits nginx's default `client_max_body_size`. `strfry import` reads the same files from the command line, without the access lists.
+An import checks every signature but not the timestamps, so old events go in. It follows the access lists: it refuses the events of banned pubkeys, or of pubkeys off the allow list while it is on, and the gift wraps without a single `p` tag. Each event is stored for its owner: its author, or the recipient of a gift wrap. Deletion requests and requests to vanish in the file apply. The admin page sends the file in 512 KiB slices cut after a newline, which fits nginx's default `client_max_body_size`. `strfry import` reads the same files from the command line, without the access lists.
 
 ### Webhooks
 
@@ -79,9 +75,7 @@ A client registers a push server's callback by storing a `kind:30390` event ([NI
 
 Before storing a subscription, the relay sends its callback a `GET` with a random `challenge` query parameter appended, and stores the subscription only if the answer is a `2xx` whose body is exactly that challenge. The `OK` waits for this answer, up to `timeoutSeconds`. A pubkey can have `maxSubscriptionsPerPubkey` subscriptions waiting for their callback at once: more are refused with `rate-limited:`. Subscriptions imported from the admin page or with `strfry import` are not verified.
 
-For each new event its author owns (a gift wrap counts for its recipient) that matches a `filter` tag and no `ignore` tag, the relay POSTs `{"id": "<event id>", "relay": "wss://private.example.com/"}` to the callback, with `Content-Type: application/json`. With an `include_event` tag, the body also holds the whole `event`. The subscription itself is stored like any event: only its author can read it, a newer one with the same `d` tag replaces it, and NIP-09 or NIP-40 delete it. Subscriptions are never pushed, since their callbacks act as secrets.
-
-With an `ignore_self` tag, the relay skips the events it received over a connection authenticated as the subscription's author. With `authorOnlyWrites` on, that is every event sent over a websocket apart from requests to vanish, so the tag is meant for `authorOnlyWrites = false`: there, a NIP-17 inbox subscription would otherwise push the copy of every message the user sends.
+For each new event the subscription's author stores, whoever signed it, that matches a `filter` tag and no `ignore` tag, the relay POSTs `{"id": "<event id>", "relay": "wss://private.example.com/"}` to the callback, with `Content-Type: application/json`. With an `include_event` tag, the body also holds the whole `event`. The subscription itself is stored like any event: only its author can store and read it, a newer one with the same `d` tag replaces it, and NIP-09 or NIP-40 delete it. Subscriptions are never pushed, since their callbacks act as secrets.
 
 The relay answers `OK false` with `invalid:` to a subscription whose `relay` tag doesn't name `relay.auth.serviceUrl`, without a valid `filter`, without exactly one `callback`, or whose callback doesn't echo the challenge. The callback must be `https://` and can't point to a loopback, private or link-local address. Host names are checked again once resolved, before each connection. A callback answering `404` to a POST deletes its subscription. Other errors are only logged, and nothing is retried.
 
@@ -89,7 +83,7 @@ These options are under `relay.webhooks`:
 
 | Option | Default | |
 | --- | --- | --- |
-| `enabled` | `true` | Push to callbacks. Needs `authorOnlyReads` and `relay.auth.serviceUrl` |
+| `enabled` | `true` | Push to callbacks. Needs `relay.auth.serviceUrl` |
 | `maxSubscriptionsPerPubkey` | `20` | How many subscriptions a pubkey can store. More are refused with `blocked:` |
 | `timeoutSeconds` | `10` | How long a callback has to answer |
 | `allowHttp` | `false` | Accept `http://` callbacks, which send the events unencrypted |
@@ -97,9 +91,9 @@ These options are under `relay.webhooks`:
 
 ### Limits
 
-* This is not a DM inbox. Someone sending you a gift wrap can't AUTH as you, so the relay refuses it. Keep your `kind:10050` relays separate.
+* This is not a DM inbox. A gift wrap someone sends you goes into their storage, not yours, so you never see it. Keep your `kind:10050` relays separate.
 * Anyone who can store events can make the relay send a `GET` with a `challenge` to any public URL, one per subscription they publish. Only a callback that echoes it receives POSTs.
-* `strfry sync`, `strfry stream` and `strfry router` don't AUTH, so they can't read from or write to a relay in private mode over the network. Back up the server from the admin page, or with `strfry export`.
+* `strfry sync`, `strfry stream` and `strfry router` don't AUTH, so they can't read from or write to this relay over the network. Back up the server from the admin page, or with `strfry export`.
 
 The rest of this document is strfry's own documentation.
 

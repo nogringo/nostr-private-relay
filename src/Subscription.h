@@ -4,6 +4,7 @@
 
 #include "golpe.h"
 #include "filters.h"
+#include "AuthedPubkeys.h"
 
 
 struct SubId {
@@ -47,8 +48,8 @@ namespace std {
 
 
 struct Subscription : NonCopyable {
-    Subscription(uint64_t connId_, const std::string &subId_, NostrFilterGroup filterGroup_, bool countOnly_ = false)
-        : connId(connId_), subId(subId_), filterGroup(std::move(filterGroup_)), countOnly(countOnly_) {}
+    Subscription(uint64_t connId_, const std::string &subId_, NostrFilterGroup filterGroup_, bool countOnly_ = false, AuthedPubkeys uploaders_ = {})
+        : connId(connId_), subId(subId_), filterGroup(std::move(filterGroup_)), countOnly(countOnly_), uploaders(std::move(uploaders_)) {}
 
     // Params
 
@@ -56,10 +57,11 @@ struct Subscription : NonCopyable {
     SubId subId;
     NostrFilterGroup filterGroup;
     bool countOnly;
+    AuthedPubkeys uploaders; // NIP-37: when set, only what these pubkeys uploaded matches
 
     // State
 
-    uint64_t latestEventId = MAX_U64;
+    uint64_t latestEventId = MAX_U64; // an upload id when uploaders is set
 };
 
 

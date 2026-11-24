@@ -28,10 +28,8 @@ static void checkConfig() {
         }
     }
 
-    if (cfg().relay__auth__authorOnlyReads || cfg().relay__auth__authorOnlyWrites) {
-        if (!cfg().relay__auth__enabled || cfg().relay__auth__serviceUrl.empty()) {
-            LW << "relay.auth.authorOnlyReads/authorOnlyWrites need relay.auth.enabled and relay.auth.serviceUrl: until they are set, nobody can read or write";
-        }
+    if (cfg().relay__auth__serviceUrl.empty()) {
+        LW << "relay.auth.serviceUrl must be set: until it is, nobody can read or write";
     }
 
     for (auto item : AccessControl::splitList(cfg().relay__admin__pubkeys)) {

@@ -1,10 +1,10 @@
 #include "RelayServer.h"
 
 #include "ActiveMonitors.h"
-#include "ReadRestrictor.h"
 
 
 
+// NIP-37: every subscription is scoped to its uploaders, so it follows uploads rather than events
 void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
     auto dbChangeWatcher = hoytech::file_change_monitor(dbDir + "/data.mdb");
 
@@ -17,67 +17,51 @@ void RelayServer::runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr) {
 
     Decompressor decomp;
     ActiveMonitors monitors;
-    AuthedPubkeysByConn authedPubkeys;
-    uint64_t currEventId = MAX_U64;
+    uint64_t currUploadId = MAX_U64;
 
     while (1) {
         auto newMsgs = thr.inbox.pop_all();
 
         auto txn = env.txn_ro();
 
-        uint64_t latestEventId = getMostRecentLevId(txn);
-        if (currEventId > latestEventId) currEventId = latestEventId;
+        uint64_t latestUploadId = getMostRecentUploadId(txn);
+        if (currUploadId > latestUploadId) currUploadId = latestUploadId;
+
+        auto foreachUploadAfter = [&](uint64_t uploadId, const std::function<void(uint64_t, const UploadView &, defaultDb::environment::View_Event &)> &cb){
+            env.foreach_Upload(txn, [&](auto &upload){
+                UploadView view(upload.buf);
+                if (auto ev = env.lookup_Event(txn, view.levId())) cb(upload.primaryKeyId, view, *ev);
+                return true;
+            }, false, uploadId + 1);
+        };
 
         for (auto &newMsg : newMsgs) {
             if (auto msg = std::get_if<MsgReqMonitor::NewSub>(&newMsg.msg)) {
                 auto connId = msg->sub.connId;
-                const auto &connAuthedPubkeys = authedPubkeys.get(connId);
 
-                env.foreach_Event(txn, [&](auto &ev){
-                    PackedEventView packed(ev.buf);
-                    if (msg->sub.filterGroup.doesMatch(packed)) {
-                        if (ReadRestrictor::shouldSendToSubscriber(packed, connAuthedPubkeys)) {
-                            sendEvent(connId, msg->sub.subId, getEventJson(txn, decomp, ev.primaryKeyId));
-                        }
+                foreachUploadAfter(msg->sub.latestEventId, [&](uint64_t, const UploadView &upload, auto &ev){
+                    if (msg->sub.uploaders.contains(upload.uploader()) && msg->sub.filterGroup.doesMatch(PackedEventView(ev.buf))) {
+                        sendEvent(connId, msg->sub.subId, getEventJson(txn, decomp, ev.primaryKeyId));
                     }
+                });
 
-                    return true;
-                }, false, msg->sub.latestEventId + 1);
+                msg->sub.latestEventId = latestUploadId;
 
-                msg->sub.latestEventId = latestEventId;
-
-                if (!monitors.addSub(txn, std::move(msg->sub), latestEventId)) {
+                if (!monitors.addSub(txn, std::move(msg->sub), latestUploadId)) {
                     sendNoticeError(connId, std::string("too many concurrent REQs"));
                 }
-            } else if (auto msg = std::get_if<MsgReqMonitor::AddAuth>(&newMsg.msg)) {
-                authedPubkeys.add(msg->connId, msg->pubkey);
             } else if (auto msg = std::get_if<MsgReqMonitor::RemoveSub>(&newMsg.msg)) {
                 monitors.removeSub(msg->connId, msg->subId);
             } else if (auto msg = std::get_if<MsgReqMonitor::CloseConn>(&newMsg.msg)) {
-                authedPubkeys.erase(msg->connId);
                 monitors.closeConn(msg->connId);
             } else if (std::get_if<MsgReqMonitor::DBChange>(&newMsg.msg)) {
-                env.foreach_Event(txn, [&](auto &ev){
-                    monitors.process(txn, ev, [&](RecipientList &&recipients, uint64_t levId){
-                        PackedEventView packed(ev.buf);
-                        if (ReadRestrictor::mayRestrict(packed.kind())) {
-                            RecipientList filteredRecipients;
-                            for (const auto &recipient : recipients) {
-                                if (ReadRestrictor::shouldSendToSubscriber(packed, authedPubkeys.get(recipient.connId))) {
-                                    filteredRecipients.emplace_back(recipient);
-                                }
-                            }
-                            if (!filteredRecipients.empty()) {
-                                sendEventToBatch(std::move(filteredRecipients), std::string(getEventJson(txn, decomp, levId)));
-                            }
-                        } else {
-                            sendEventToBatch(std::move(recipients), std::string(getEventJson(txn, decomp, levId)));
-                        }
+                foreachUploadAfter(currUploadId, [&](uint64_t uploadId, const UploadView &upload, auto &ev){
+                    monitors.process(txn, ev, uploadId, upload.uploader(), [&](RecipientList &&recipients, uint64_t levId){
+                        sendEventToBatch(std::move(recipients), std::string(getEventJson(txn, decomp, levId)));
                     });
-                    return true;
-                }, false, currEventId + 1);
+                });
 
-                currEventId = latestEventId;
+                currUploadId = latestUploadId;
             }
         }
     }

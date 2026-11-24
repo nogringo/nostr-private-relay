@@ -1,7 +1,6 @@
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { setTimeout as delay } from "node:timers/promises";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "@nostr/tools";
 import { openWebSocket, WsClient } from "../utils/websocketClient.js";
 import { config, runRelaySuite, writeConfig } from "../utils/relay.js";
@@ -34,14 +33,19 @@ const alice = newUser();
 const bob = newUser();
 const carol = newUser();
 
-const stored = { [alice.pub]: new Set(), [bob.pub]: new Set() };
+// NIP-37: what each pubkey uploaded, which is all it can read back
+const stored = new Map([alice, bob, carol].map((user) => [user.pub, new Map()]));
+const keep = (user, ...evs) => evs.forEach((ev) => stored.get(user.pub).set(ev.id, ev));
+const drop = (user, ...evs) => evs.forEach((ev) => stored.get(user.pub).delete(ev.id));
+const idsOf = (user) => new Set(stored.get(user.pub).keys());
+const signedBy = (user, author) => [...stored.get(user.pub).values()].filter((ev) => ev.pubkey === author.pub);
 
 function sign(user, { kind = 1, tags = [], content = "", created_at = now() } = {}) {
   return finalizeEvent({ kind, tags, content, created_at }, user.sk);
 }
 
-function writeRelayConfig(options = {}) {
-  writeConfig(config(dbDir, port, true, { privateStorage: true, maxPubkeysPerConnection: 2, ...options }), cfgPath);
+function writeRelayConfig() {
+  writeConfig(config(dbDir, port, { maxPubkeysPerConnection: 2 }), cfgPath);
 }
 
 let wsUrl;
@@ -132,7 +136,7 @@ async function testEverythingNeedsAuth() {
   pass("testEverythingNeedsAuth");
 }
 
-async function testWritesNeedTheirAuthor({ aliceConn, bobConn }) {
+async function testUploadsAreKeptForTheirUploader({ aliceConn, bobConn }) {
   expect((await authAs(aliceConn, alice))[2] === true, "alice should AUTH");
   expect((await authAs(aliceConn, alice))[2] === true, "AUTH again as the same pubkey should succeed");
   expect((await authAs(bobConn, bob))[2] === true, "bob should AUTH");
@@ -153,70 +157,92 @@ async function testWritesNeedTheirAuthor({ aliceConn, bobConn }) {
     draft("draft-1", "encrypted draft"),
     draft("draft-max", "A".repeat(MAX_NIP44_PAYLOAD_LENGTH)),
   ]) {
-    await store(aliceConn, ev);
-    stored[alice.pub].add(ev.id);
+    keep(alice, await store(aliceConn, ev));
   }
 
-  for (const ev of [
-    sign(bob, { content: "bob note" }),
-    sign(bob, { kind: 31234, tags: [["d", "bob-draft"], ["k", "1"]], content: "bob draft" }),
-  ]) {
-    await store(bobConn, ev);
-    stored[bob.pub].add(ev.id);
+  const bobNote = sign(bob, { content: "bob note" });
+  for (const ev of [bobNote, sign(bob, { kind: 31234, tags: [["d", "bob-draft"], ["k", "1"]], content: "bob draft" })]) {
+    keep(bob, await store(bobConn, ev));
   }
 
-  const other = await publish(aliceConn, sign(bob, { content: "bob, sent by alice" }));
+  const kept = sign(bob, { content: "bob, kept by alice" });
+  const first = await publish(aliceConn, kept);
+  expect(first[2] === true && first[3] === "", `alice must be able to store bob's event for herself, got: ${first[3]}`);
+  keep(alice, kept);
+
+  const again = await publish(aliceConn, kept);
+  expect(again[2] === true && again[3].startsWith("duplicate:"), "storing the same event twice is a duplicate");
+
+  const copy = await publish(aliceConn, bobNote);
   expect(
-    other[2] === false && other[3].startsWith("restricted:"),
-    "an event from someone else than the authenticated pubkey must be restricted",
+    copy[2] === true && copy[3] === "",
+    `an event another user stored must be new to alice, without telling her it exists, got: ${copy[3]}`,
+  );
+  keep(alice, bobNote);
+
+  const protectedEv = await publish(aliceConn, sign(bob, { content: "protected", tags: [["-"]] }));
+  expect(
+    protectedEv[2] === false && protectedEv[3].startsWith("restricted:"),
+    "a NIP-70 protected event can only be stored by its author",
   );
 
-  pass("testWritesNeedTheirAuthor");
+  pass("testUploadsAreKeptForTheirUploader");
 }
 
-async function testReadsOnlyReturnOwnEvents({ aliceConn }) {
+async function testReadsOnlyReturnOwnUploads({ aliceConn, bobConn }) {
   const all = await query(aliceConn, "all", {});
-  expect(
-    sameIds(all.events, stored[alice.pub]),
-    `REQ {} must return exactly alice's events, got ${all.events.length}`,
-  );
+  expect(sameIds(all.events, idsOf(alice)), `REQ {} must return exactly what alice stored, got ${all.events.length}`);
 
   const bobs = await query(aliceConn, "bobs", { authors: [bob.pub] });
   expect(
-    bobs.closed?.startsWith("restricted:"),
-    `asking for another author must be CLOSED with restricted:, got: ${bobs.closed}`,
+    !bobs.closed && sameIds(bobs.events, new Set(signedBy(alice, bob).map((ev) => ev.id))),
+    `asking for another author must return the copies alice stored, got: ${bobs.closed ?? bobs.events.length}`,
   );
 
-  const bobNoteId = [...stored[bob.pub]][0];
-  const byId = await query(aliceConn, "by-id", { ids: [bobNoteId] });
-  expect(byId.events.length === 0 && !byId.closed, "another user's event must not be served by id");
+  const bobDraft = signedBy(bob, bob).find((ev) => ev.kind === 31234);
+  const byId = await query(aliceConn, "by-id", { ids: [bobDraft.id] });
+  expect(byId.events.length === 0 && !byId.closed, "an event alice didn't store must not be served to her, even by id");
 
   const mixed = await query(aliceConn, "mixed", { authors: [alice.pub, bob.pub], kinds: [31234] });
   expect(
     mixed.events.length === 2 && mixed.events.every((ev) => ev.pubkey === alice.pub),
-    "authors must be narrowed down to the authenticated pubkey",
+    "a filter on several authors must only match what alice stored",
   );
+
+  const forBob = await query(bobConn, "bob-all", {});
+  expect(sameIds(forBob.events, idsOf(bob)), "bob must not get what alice stored, even the events he signed");
 
   aliceConn.send(["COUNT", "count", {}]);
   const count = await aliceConn.waitFor((m) => m[1] === "count");
   expect(
-    count[0] === "COUNT" && count[2].count === stored[alice.pub].size,
-    `COUNT {} must only count alice's events, got ${JSON.stringify(count)}`,
+    count[0] === "COUNT" && count[2].count === idsOf(alice).size,
+    `COUNT {} must only count what alice stored, got ${JSON.stringify(count)}`,
   );
 
-  pass("testReadsOnlyReturnOwnEvents");
+  pass("testReadsOnlyReturnOwnUploads");
 }
 
-async function testSeveralPubkeysPerConnection() {
+async function testSeveralPubkeysPerConnection({ aliceConn, bobConn }) {
   const client = await connect();
   expect((await authAs(client, alice))[2] === true, "first AUTH should succeed");
   expect((await authAs(client, bob))[2] === true, "second AUTH as another pubkey should succeed");
 
   const both = await query(client, "both", {});
   expect(
-    sameIds(both.events, new Set([...stored[alice.pub], ...stored[bob.pub]])),
-    "a connection authenticated as two pubkeys must see the events of both",
+    sameIds(both.events, new Set([...idsOf(alice), ...idsOf(bob)])),
+    "a connection authenticated as two pubkeys must see what both stored",
   );
+
+  // The event's owner stores it when the connection authenticated as them, else the first pubkey
+  const bobsOwn = await store(client, sign(bob, { content: "bob, from a shared connection" }));
+  keep(bob, bobsOwn);
+  const carols = await store(client, sign(carol, { content: "carol, from a shared connection" }));
+  keep(alice, carols);
+
+  const forBob = await query(bobConn, "shared-bob", { ids: [bobsOwn.id, carols.id] });
+  const forAlice = await query(aliceConn, "shared-alice", { ids: [bobsOwn.id, carols.id] });
+  expect(sameIds(forBob.events, new Set([bobsOwn.id])), "bob's event must be stored for bob");
+  expect(sameIds(forAlice.events, new Set([carols.id])), "someone else's event must be stored for the first pubkey");
 
   const third = await authAs(client, carol);
   expect(
@@ -233,23 +259,26 @@ async function testLiveEventsStayPrivate({ aliceConn, bobConn }) {
   await aliceConn.waitFor((m) => m[0] === "EOSE" && m[1] === "live");
 
   const bobLive = await store(bobConn, sign(bob, { content: "bob live" }));
-  stored[bob.pub].add(bobLive.id);
+  keep(bob, bobLive);
   const aliceLive = await store(aliceConn, sign(alice, { content: "alice live" }));
-  stored[alice.pub].add(aliceLive.id);
+  keep(alice, aliceLive);
 
   const msgs = await aliceConn.collectUntil(
     (m) => m[0] === "EVENT" && m[1] === "live" && m[2].id === aliceLive.id,
   );
   expect(
     !msgs.some((m) => m[0] === "EVENT" && m[2].pubkey === bob.pub),
-    "a live subscription must not receive other users' events",
+    "a live subscription must not receive what other users store",
   );
+
+  keep(alice, await store(aliceConn, bobLive));
+  await aliceConn.waitFor((m) => m[0] === "EVENT" && m[1] === "live" && m[2].id === bobLive.id);
   aliceConn.send(["CLOSE", "live"]);
 
   pass("testLiveEventsStayPrivate");
 }
 
-async function testGiftWrapsBelongToTheirRecipient({ aliceConn, bobConn }) {
+async function testGiftWraps({ aliceConn, bobConn }) {
   const wrap = sign(newUser(), {
     kind: 1059,
     tags: [["p", alice.pub]],
@@ -257,46 +286,43 @@ async function testGiftWrapsBelongToTheirRecipient({ aliceConn, bobConn }) {
     created_at: now() - 3600,
   });
 
-  const fromBob = await publish(bobConn, wrap);
-  expect(fromBob[2] === false, "only the recipient may store a gift wrap");
-  await store(aliceConn, wrap);
+  // A sender can keep a copy of the wrap they sent
+  keep(bob, await store(bobConn, wrap));
+  keep(alice, await store(aliceConn, wrap));
 
   const signedByBob = sign(bob, { kind: 1059, tags: [["p", alice.pub]], content: "sealed" });
-  const fromSigner = await publish(bobConn, signedByBob);
-  expect(
-    fromSigner[2] === false && fromSigner[3].startsWith("restricted:"),
-    "the signer of a gift wrap must not store it for its recipient",
-  );
+  keep(bob, await store(bobConn, signedByBob));
 
   const toBoth = sign(newUser(), { kind: 1059, tags: [["p", bob.pub], ["p", alice.pub]], content: "sealed" });
   for (const conn of [bobConn, aliceConn]) {
     const ok = await publish(conn, toBoth);
-    expect(
-      ok[2] === false && ok[3].startsWith("restricted:"),
-      "a gift wrap with several p tags has no owner and must be refused",
-    );
+    expect(ok[2] === false && ok[3].startsWith("invalid:"), `a gift wrap must have a single p tag, got: ${ok[3]}`);
   }
 
   const forAlice = await query(aliceConn, "wraps", { kinds: [1059], "#p": [alice.pub] });
-  expect(sameIds(forAlice.events, new Set([wrap.id])), "the recipient must get their gift wrap");
+  expect(sameIds(forAlice.events, new Set([wrap.id])), "the recipient must get the gift wrap she stored, and only it");
 
   const all = await query(aliceConn, "all-with-wrap", {});
-  expect(all.events.some((ev) => ev.id === wrap.id), "REQ {} must include gift wraps addressed to the user");
+  expect(all.events.some((ev) => ev.id === wrap.id), "REQ {} must include the gift wraps the user stored");
 
   const forBob = await query(bobConn, "wraps", { kinds: [1059] });
-  expect(forBob.events.length === 0, "gift wraps must not be served to anyone else");
+  expect(sameIds(forBob.events, new Set([wrap.id, signedByBob.id])), "the sender must get the copies he stored");
 
   // NIP-59: the recipient deletes the wrap by its id, even though they didn't sign it
   const deletion = await store(aliceConn, sign(alice, { kind: 5, tags: [["e", wrap.id]] }));
-  stored[alice.pub].add(deletion.id);
+  keep(alice, deletion);
+  drop(alice, wrap);
 
   const afterDelete = await query(aliceConn, "wraps-deleted", { kinds: [1059] });
-  expect(afterDelete.events.length === 0, "the recipient must be able to delete their gift wrap");
+  expect(afterDelete.events.length === 0, "the recipient must be able to delete her gift wrap");
 
   const again = await publish(aliceConn, wrap);
   expect(again[2] === false && again[3].startsWith("deleted:"), "a deleted gift wrap can't be stored again");
 
-  pass("testGiftWrapsBelongToTheirRecipient");
+  const bobsCopy = await query(bobConn, "wraps-kept", { ids: [wrap.id] });
+  expect(bobsCopy.events.length === 1, "a deletion only removes the copy of the pubkey that stored it");
+
+  pass("testGiftWraps");
   return wrap;
 }
 
@@ -310,8 +336,7 @@ async function testSignerCantTouchAGiftWrap({ aliceConn }) {
   const storedAfterVanish = sign(signer, { kind: 1059, tags: [["p", alice.pub]], content: "sealed", created_at: now() - 7200 });
 
   await store(signerConn, sign(signer, { kind: 5, tags: [["e", wrap.id]], content: "before" }));
-  await store(aliceConn, wrap);
-  stored[alice.pub].add(wrap.id);
+  keep(alice, await store(aliceConn, wrap));
 
   await store(signerConn, sign(signer, { kind: 5, tags: [["e", wrap.id]], content: "after" }));
 
@@ -319,12 +344,11 @@ async function testSignerCantTouchAGiftWrap({ aliceConn }) {
   const count = await signerConn.waitFor((m) => m[1] === "signer-count");
   expect(
     count[0] === "COUNT" && count[2].count === 0,
-    `the signer must not count a gift wrap, got ${JSON.stringify(count)}`,
+    `the signer must not count a gift wrap it didn't store, got ${JSON.stringify(count)}`,
   );
 
   await store(signerConn, sign(signer, { kind: 62, tags: [["relay", serviceUrl]] }));
-  await store(aliceConn, storedAfterVanish);
-  stored[alice.pub].add(storedAfterVanish.id);
+  keep(alice, await store(aliceConn, storedAfterVanish));
 
   const kept = await query(aliceConn, "signer-wraps", { kinds: [1059] });
   expect(
@@ -334,6 +358,75 @@ async function testSignerCantTouchAGiftWrap({ aliceConn }) {
 
   await signerConn.close();
   pass("testSignerCantTouchAGiftWrap");
+}
+
+async function testCopiesAreDeletedOnTheirOwn({ aliceConn, bobConn }) {
+  const carolConn = await connect();
+  expect((await authAs(carolConn, carol))[2] === true, "carol should AUTH");
+
+  const note = sign(alice, { content: "copied note", created_at: now() - 30 });
+  keep(alice, await store(aliceConn, note));
+  keep(bob, await store(bobConn, note));
+
+  const deletion = sign(alice, { kind: 5, tags: [["e", note.id]] });
+  keep(alice, await store(aliceConn, deletion));
+  drop(alice, note);
+
+  expect((await query(aliceConn, "deleted-note", { ids: [note.id] })).events.length === 0, "alice's deletion must delete her copy");
+  expect((await query(bobConn, "kept-note", { ids: [note.id] })).events.length === 1, "alice's deletion must not touch bob's copy");
+
+  const again = await publish(aliceConn, note);
+  expect(again[2] === false && again[3].startsWith("deleted:"), "alice can't store the note she deleted again");
+
+  // A pubkey can delete its own copy of someone else's event
+  keep(bob, await store(bobConn, sign(bob, { kind: 5, tags: [["e", note.id]] })));
+  drop(bob, note);
+  expect((await query(bobConn, "bob-deleted", { ids: [note.id] })).events.length === 0, "bob must be able to delete his copy");
+
+  const bobAgain = await publish(bobConn, note);
+  expect(bobAgain[2] === false && bobAgain[3].startsWith("deleted:"), "bob can't store the copy he deleted again");
+
+  // Nobody stores the note anymore, yet carol never deleted it
+  await store(carolConn, note);
+  expect((await query(carolConn, "carol-note", { ids: [note.id] })).events.length === 1, "carol must still be able to store the note");
+
+  // NIP-09: the author's deletion applies to the storage of whoever stores it
+  await store(carolConn, deletion);
+  expect((await query(carolConn, "carol-deleted", { ids: [note.id] })).events.length === 0, "a copy of the author's deletion must delete carol's copy");
+
+  await carolConn.close();
+  pass("testCopiesAreDeletedOnTheirOwn");
+}
+
+async function testReplaceableCopies({ aliceConn, bobConn }) {
+  const carolConn = await connect();
+  expect((await authAs(carolConn, carol))[2] === true, "carol should AUTH");
+
+  const profile = (name, created_at) => sign(alice, { kind: 0, content: JSON.stringify({ name }), created_at });
+  const v1 = profile("v1", now() - 20);
+  const v2 = profile("v2", now() - 10);
+  const profiles = (conn, subId) => query(conn, subId, { kinds: [0], authors: [alice.pub] });
+
+  keep(alice, await store(aliceConn, v1));
+  keep(bob, await store(bobConn, v1));
+  keep(alice, await store(aliceConn, v2));
+  drop(alice, v1);
+
+  expect(sameIds((await profiles(aliceConn, "alice-profile")).events, new Set([v2.id])), "alice's newer profile must replace hers");
+  expect(sameIds((await profiles(bobConn, "bob-profile")).events, new Set([v1.id])), "alice's newer profile must not replace bob's copy");
+
+  keep(bob, await store(bobConn, v2));
+  drop(bob, v1);
+  expect(sameIds((await profiles(bobConn, "bob-newer")).events, new Set([v2.id])), "bob's newer copy must replace his older one");
+
+  const older = await publish(carolConn, v1);
+  expect(older[2] === true, `carol must be able to store an older version that only others replaced, got: ${older[3]}`);
+  await store(carolConn, v2);
+  const replaced = await publish(carolConn, v1);
+  expect(replaced[2] === false && replaced[3].startsWith("replaced:"), "carol can't store an older version than hers");
+
+  await carolConn.close();
+  pass("testReplaceableCopies");
 }
 
 async function syncWithNegentropy(client, subId, filter) {
@@ -359,18 +452,19 @@ async function syncWithNegentropy(client, subId, filter) {
   return { need };
 }
 
-async function testNegentropyOnlySyncsOwnEvents({ aliceConn }) {
+async function testNegentropyOnlySyncsOwnUploads({ aliceConn }) {
   const { need, error } = await syncWithNegentropy(aliceConn, "neg-all", {});
   expect(!error, `negentropy should work once authenticated, got: ${error}`);
-  expect(
-    need.size === stored[alice.pub].size && [...stored[alice.pub]].every((id) => need.has(id)),
-    `negentropy must offer exactly alice's events, got ${need.size}`,
-  );
+  expect(sameIds([...need].map((id) => ({ id })), idsOf(alice)), `negentropy must offer exactly what alice stored, got ${need.size}`);
 
   const bobs = await syncWithNegentropy(aliceConn, "neg-bob", { authors: [bob.pub] });
-  expect(bobs.error?.startsWith("restricted:"), "negentropy on another author must be restricted");
+  expect(!bobs.error, `negentropy on another author should work, got: ${bobs.error}`);
+  expect(
+    sameIds([...bobs.need].map((id) => ({ id })), new Set(signedBy(alice, bob).map((ev) => ev.id))),
+    "negentropy on another author must only offer the copies alice stored",
+  );
 
-  pass("testNegentropyOnlySyncsOwnEvents");
+  pass("testNegentropyOnlySyncsOwnUploads");
 }
 
 async function testRequestToVanish({ aliceConn, bobConn }, deletedWrap) {
@@ -401,10 +495,20 @@ async function testRequestToVanish({ aliceConn, bobConn }, deletedWrap) {
     `only the request to vanish itself must be left, got ${left.events.length} events`,
   );
 
+  const bobs = await query(bobConn, "bob-untouched", {});
+  expect(
+    sameIds(bobs.events, idsOf(bob)),
+    "a request to vanish must not touch what other users stored, even alice's events and her gift wraps",
+  );
+
   for (const ev of [old, wrap, deletedWrap]) {
     const again = await publish(aliceConn, ev);
-    expect(again[2] === false && again[3].startsWith("deleted:"), "vanished events can't be published again");
+    expect(again[2] === false && again[3].startsWith("deleted:"), "vanished events can't be stored again in alice's storage");
   }
+
+  const bobCopy = await publish(bobConn, old);
+  expect(bobCopy[2] === true, `bob must still be able to store a copy of alice's old event, got: ${bobCopy[3]}`);
+  keep(bob, old);
 
   await store(aliceConn, sign(alice, { kind: 5, tags: [["e", vanish.id]], created_at: vanish.created_at + 1 }));
   const kept = await query(aliceConn, "vanish-kept", { kinds: [62] });
@@ -412,49 +516,7 @@ async function testRequestToVanish({ aliceConn, bobConn }, deletedWrap) {
 
   await store(aliceConn, sign(alice, { content: "back again", created_at: vanish.created_at + 1 }));
 
-  const bobs = await query(bobConn, "bob-untouched", {});
-  expect(sameIds(bobs.events, stored[bob.pub]), "other users' events must survive a request to vanish");
-
   pass("testRequestToVanish");
-}
-
-async function testInboxRefusesWrapsWithoutASingleRecipient({ aliceConn, bobConn }) {
-  const wrapFor = (pubkeys, created_at) =>
-    sign(newUser(), { kind: 1059, tags: pubkeys.map((p) => ["p", p]), content: "sealed", created_at });
-
-  const bobCanSendAWrap = async (expected) => {
-    const deadline = Date.now() + 3_000;
-    let ev, ok;
-    do {
-      await delay(100);
-      ev = wrapFor([alice.pub], now() + 60);
-      ok = await publish(bobConn, ev);
-    } while (ok[2] !== expected && Date.now() < deadline);
-    expect(ok[2] === expected, `bob's gift wrap for alice should be ${expected ? "stored" : "refused"}, got: ${ok[3]}`);
-    return ev;
-  };
-
-  writeRelayConfig({ authorOnlyWrites: false });
-  const received = await bobCanSendAWrap(true);
-
-  for (const pubkeys of [[alice.pub, bob.pub], []]) {
-    const ok = await publish(bobConn, wrapFor(pubkeys, now() + 120));
-    expect(
-      ok[2] === false && ok[3].startsWith("invalid:"),
-      `a gift wrap with ${pubkeys.length} p tags has no owner and must be refused, got: ${ok[3]}`,
-    );
-  }
-
-  const newest = await query(aliceConn, "inbox-newest", { kinds: [1059], "#p": [alice.pub], limit: 1 });
-  expect(
-    sameIds(newest.events, new Set([received.id])),
-    "the recipient must get their newest gift wrap, not lose the slot to a wrap nobody can read",
-  );
-
-  writeRelayConfig();
-  await bobCanSendAWrap(false);
-
-  pass("testInboxRefusesWrapsWithoutASingleRecipient");
 }
 
 async function testRelayInformation() {
@@ -489,15 +551,16 @@ async function main() {
 
       const conns = { aliceConn: await connect(), bobConn: await connect() };
       try {
-        await testWritesNeedTheirAuthor(conns);
-        await testReadsOnlyReturnOwnEvents(conns);
-        await testSeveralPubkeysPerConnection();
+        await testUploadsAreKeptForTheirUploader(conns);
+        await testReadsOnlyReturnOwnUploads(conns);
+        await testSeveralPubkeysPerConnection(conns);
         await testLiveEventsStayPrivate(conns);
-        const deletedWrap = await testGiftWrapsBelongToTheirRecipient(conns);
+        const deletedWrap = await testGiftWraps(conns);
         await testSignerCantTouchAGiftWrap(conns);
-        await testNegentropyOnlySyncsOwnEvents(conns);
+        await testCopiesAreDeletedOnTheirOwn(conns);
+        await testReplaceableCopies(conns);
+        await testNegentropyOnlySyncsOwnUploads(conns);
         await testRequestToVanish(conns, deletedWrap);
-        await testInboxRefusesWrapsWithoutASingleRecipient(conns);
       } finally {
         await conns.aliceConn.close();
         await conns.bobConn.close();

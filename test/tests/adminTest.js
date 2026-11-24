@@ -168,18 +168,22 @@ async function testStats(conns) {
     const ok = await publish(conns.alice, sign(alice, { content: `alice ${i}` }));
     expect(ok[2] === true, `alice should store her event: ${ok[3]}`);
   }
-  expect((await publish(conns.bob, sign(bob, { content: "bob" })))[2] === true, "bob should store his event");
+  const bobNote = sign(bob, { content: "bob" });
+  expect((await publish(conns.bob, bobNote))[2] === true, "bob should store his event");
 
-  // A wrap signed by a throwaway key belongs to its recipient
+  // A wrap signed by a throwaway key counts for whoever stored it
   const wrap = sign(newUser(), { kind: 1059, tags: [["p", alice.pub]], content: "wrapped" });
   expect((await publish(conns.alice, wrap))[2] === true, "alice should store a wrap addressed to her");
+
+  // NIP-37: an event counts for each pubkey that stored it
+  expect((await publish(conns.alice, bobNote))[2] === true, "alice should store a copy of bob's event");
 
   const stats = await call("stats");
   const aliceUsage = stats.topUsers.find((u) => u.pubkey === alice.pub);
   const bobUsage = stats.topUsers.find((u) => u.pubkey === bob.pub);
 
-  expect(aliceUsage?.events === 4, `alice must own 4 events including her wrap, got ${aliceUsage?.events}`);
-  expect(bobUsage?.events === 1, "bob must own 1 event");
+  expect(aliceUsage?.events === 5, `alice must have stored 5 events including her wrap and her copy, got ${aliceUsage?.events}`);
+  expect(bobUsage?.events === 1, "bob must have stored 1 event");
   expect(stats.topUsers[0].pubkey === alice.pub, "the top user must be the one using the most storage");
   expect(stats.events >= 5 && stats.storage > 0 && stats.dbSize > 0, "stats must report totals");
   expect(stats.users >= 2 && stats.connections >= 2, "stats must count users and connections");
@@ -312,16 +316,23 @@ async function testBackup() {
 }
 
 async function testErasePubkey() {
+  const bobConn = await connect();
+  await authAs(bobConn, bob);
+  const keptByBob = sign(alice, { content: "kept by bob" });
+  expect((await publish(bobConn, keptByBob))[2] === true, "bob should store a copy of alice's event");
+  await bobConn.close();
+
   const client = await connect();
   await authAs(client, alice);
   await authAs(client, bob);
 
   const deleted = await call("erasepubkey", [alice.pub]);
-  expect(deleted === 4, `erasepubkey must delete alice's events and the wrap addressed to her, got ${deleted}`);
+  expect(deleted === 5, `erasepubkey must delete what alice stored: her events, the wrap addressed to her and her copy of bob's event, got ${deleted}`);
 
   const left = await query(client, "left", {});
-  expect(left.every((ev) => ev.pubkey !== alice.pub && ev.kind !== 1059), "nothing of alice must remain");
-  expect(left.some((ev) => ev.pubkey === bob.pub), "bob's events must remain");
+  expect(left.every((ev) => ev.id === keptByBob.id || (ev.pubkey !== alice.pub && ev.kind !== 1059)), "nothing alice stored must remain");
+  expect(left.some((ev) => ev.id === keptByBob.id), "the copy of alice's event that bob stored must remain");
+  expect(left.some((ev) => ev.pubkey === bob.pub), "bob's events must remain, including the one alice had a copy of");
 
   const stats = await call("stats");
   expect(!stats.topUsers.some((u) => u.pubkey === alice.pub), "alice must be gone from the stats");
@@ -388,7 +399,7 @@ async function main() {
   console.log("* relay management (NIP-86) integration tests");
 
   writeConfig(
-    config(dbDir, port, true, { privateStorage: true, adminPubkeys: nip19.npubEncode(admin.pub) }),
+    config(dbDir, port, { adminPubkeys: nip19.npubEncode(admin.pub) }),
     cfgPath,
   );
 

@@ -1,12 +1,10 @@
 #include <negentropy.h>
 #include <negentropy/storage/Vector.h>
-#include <negentropy/storage/BTreeLMDB.h>
-#include <negentropy/storage/SubRange.h>
 
 #include "RelayServer.h"
 #include "QueryScheduler.h"
-#include "ReadRestrictor.h"
 
+// NIP-37: a session only covers what its uploaders stored, so it never uses a pre-computed tree of every event
 struct NegentropyViews {
     struct MemoryView {
         std::string initialMsg;
@@ -15,15 +13,8 @@ struct NegentropyViews {
         uint64_t startTime = hoytech::curr_time_us();
     };
 
-    struct StatelessView {
-        Subscription sub;
-        uint64_t treeId;
-    };
-
-    using UserView = std::variant<MemoryView, StatelessView>;
-
-    using ConnViews = flat_hash_map<SubId, UserView>;
-    flat_hash_map<uint64_t, ConnViews> conns; // connId -> subId -> UserView
+    using ConnViews = flat_hash_map<SubId, MemoryView>;
+    flat_hash_map<uint64_t, ConnViews> conns; // connId -> subId -> MemoryView
 
     bool addMemoryView(uint64_t connId, const SubId &subId, const std::string &initialMsg) {
         {
@@ -38,30 +29,12 @@ struct NegentropyViews {
             return false;
         }
 
-        connViews.try_emplace(subId, UserView{ MemoryView{ initialMsg, } });
+        connViews.try_emplace(subId, MemoryView{ initialMsg, });
 
         return true;
     }
 
-    bool addStatelessView(uint64_t connId, const SubId &subId, Subscription &&sub, uint64_t treeId) {
-        {
-            auto *existing = findView(connId, subId);
-            if (existing) removeView(connId, subId);
-        }
-
-        auto res = conns.try_emplace(connId);
-        auto &connViews = res.first->second;
-
-        if (connViews.size() >= cfg().relay__maxSubsPerConnection) {
-            return false;
-        }
-
-        connViews.try_emplace(subId, UserView{ StatelessView{ std::move(sub), treeId, } });
-
-        return true;
-    }
-
-    UserView *findView(uint64_t connId, const SubId &subId) {
+    MemoryView *findView(uint64_t connId, const SubId &subId) {
         auto f1 = conns.find(connId);
         if (f1 == conns.end()) return nullptr;
 
@@ -90,7 +63,6 @@ struct NegentropyViews {
 void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
     QueryScheduler queries;
     NegentropyViews views;
-    AuthedPubkeysByConn authedPubkeys;
 
     auto handleReconcile = [&](uint64_t connId, const SubId &subId, negentropy::StorageBase &storage, const std::string &msg) {
         std::string resp;
@@ -126,11 +98,8 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
     queries.ensureExists = false;
 
     queries.onEventBatch = [&](lmdb::txn &txn, const auto &sub, const std::vector<uint64_t> &levIds){
-        auto *userView = views.findView(sub.connId, sub.subId);
-        if (!userView) return;
-
-        auto *view = std::get_if<NegentropyViews::MemoryView>(userView);
-        if (!view) throw herr("bad variant, expected memory view");
+        auto *view = views.findView(sub.connId, sub.subId);
+        if (!view) return;
 
         for (auto levId : levIds) {
             view->levIds.push_back(levId);
@@ -138,11 +107,8 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
     };
 
     queries.onComplete = [&](lmdb::txn &txn, Subscription &sub, uint64_t){
-        auto *userView = views.findView(sub.connId, sub.subId);
-        if (!userView) return;
-
-        auto *view = std::get_if<NegentropyViews::MemoryView>(userView);
-        if (!view) throw herr("bad variant, expected memory view");
+        auto *view = views.findView(sub.connId, sub.subId);
+        if (!view) return;
 
         LI << "[" << sub.connId << "] negentropy QUERY matched " << view->levIds.size() << " events in "
            << (hoytech::curr_time_us() - view->startTime) << "us";
@@ -166,10 +132,7 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
 
         for (auto levId : view->levIds) {
             try {
-                auto ev = lookupEventByLevId(txn, levId);
-                PackedEventView packed(ev.buf);
-
-                if (ReadRestrictor::shouldSendToSubscriber(packed, authedPubkeys.get(sub.connId)))
+                PackedEventView packed(lookupEventByLevId(txn, levId).buf);
                 view->storageVector.insert(packed.created_at(), packed.id());
             } catch (std::exception &) {
                 // levId was deleted when query was paused
@@ -196,47 +159,25 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
             if (auto msg = std::get_if<MsgNegentropy::NegOpen>(&newMsg.msg)) {
                 auto connId = msg->sub.connId;
                 auto subId = msg->sub.subId;
-                std::optional<uint64_t> treeId;
-
-                env.foreach_NegentropyFilter(txn, [&](auto &f){
-                    if (f.filter() == msg->filterStr) {
-                        treeId = f.primaryKeyId;
-                        return false;
-                    }
-                    return true;
-                });
 
                 queries.removeSub(connId, subId);
                 views.removeView(connId, subId);
 
-                LI << "[" << connId << "] negentropy NEW session=" << subId.sv() << " bytesIn=" << msg->negPayload.size() << " tree=" << (treeId ? std::to_string(*treeId) : "NONE");
+                LI << "[" << connId << "] negentropy NEW session=" << subId.sv() << " bytesIn=" << msg->negPayload.size();
 
-                if (treeId) {
-                    negentropy::storage::BTreeLMDB storage(txn, negentropyDbi, *treeId);
-
-                    const auto &f = msg->sub.filterGroup.filters.at(0);
-                    negentropy::storage::SubRange subStorage(storage, negentropy::Bound(f.since), negentropy::Bound(f.until == MAX_U64 ? MAX_U64 : f.until + 1));
-                    handleReconcile(connId, subId, subStorage, msg->negPayload);
-
-                    if (!views.addStatelessView(connId, subId, std::move(msg->sub), *treeId)) {
-                        queries.removeSub(connId, subId);
-                        sendNoticeError(connId, std::string("too many concurrent NEG requests"));
-                    }
-                } else {
-                    if (!queries.addSub(txn, std::move(msg->sub))) {
-                        sendNoticeError(connId, std::string("too many concurrent REQs"));
-                    }
-
-                    if (!views.addMemoryView(connId, subId, msg->negPayload)) {
-                        queries.removeSub(connId, subId);
-                        sendNoticeError(connId, std::string("too many concurrent NEG requests"));
-                    }
-
-                    queries.process(txn);
+                if (!queries.addSub(txn, std::move(msg->sub))) {
+                    sendNoticeError(connId, std::string("too many concurrent REQs"));
                 }
+
+                if (!views.addMemoryView(connId, subId, msg->negPayload)) {
+                    queries.removeSub(connId, subId);
+                    sendNoticeError(connId, std::string("too many concurrent NEG requests"));
+                }
+
+                queries.process(txn);
             } else if (auto msg = std::get_if<MsgNegentropy::NegMsg>(&newMsg.msg)) {
-                auto *userView = views.findView(msg->connId, msg->subId);
-                if (!userView) {
+                auto *view = views.findView(msg->connId, msg->subId);
+                if (!view) {
                     PROM_INC_RELAY_MSG("NEG-ERR");
                     sendToConn(msg->connId, tao::json::to_string(tao::json::value::array({
                         "NEG-ERR",
@@ -249,29 +190,18 @@ void RelayServer::runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr) {
 
                 LI << "[" << msg->connId << "] negentropy RECV session=" << msg->subId.sv() << " bytesIn=" << msg->negPayload.size();
 
-                if (auto *view = std::get_if<NegentropyViews::MemoryView>(userView)) {
-                    if (!view->storageVector.sealed) {
-                        sendNoticeError(msg->connId, "negentropy error: got NEG-MSG before NEG-OPEN complete");
-                        continue;
-                    }
-                    handleReconcile(msg->connId, msg->subId, view->storageVector, msg->negPayload);
-                } else if (auto *view = std::get_if<NegentropyViews::StatelessView>(userView)) {
-                    negentropy::storage::BTreeLMDB storage(txn, negentropyDbi, view->treeId);
-
-                    const auto &f = view->sub.filterGroup.filters.at(0);
-                    negentropy::storage::SubRange subStorage(storage, negentropy::Bound(f.since), negentropy::Bound(f.until == MAX_U64 ? MAX_U64 : f.until + 1));
-
-                    handleReconcile(msg->connId, msg->subId, subStorage, msg->negPayload);
+                if (!view->storageVector.sealed) {
+                    sendNoticeError(msg->connId, "negentropy error: got NEG-MSG before NEG-OPEN complete");
+                    continue;
                 }
-            } else if (auto msg = std::get_if<MsgNegentropy::AddAuth>(&newMsg.msg)) {
-                authedPubkeys.add(msg->connId, msg->pubkey);
+
+                handleReconcile(msg->connId, msg->subId, view->storageVector, msg->negPayload);
             } else if (auto msg = std::get_if<MsgNegentropy::NegClose>(&newMsg.msg)) {
                 LI << "[" << msg->connId << "] negentropy CLOSE session=" << msg->subId.sv();
 
                 queries.removeSub(msg->connId, msg->subId);
                 views.removeView(msg->connId, msg->subId);
             } else if (auto msg = std::get_if<MsgNegentropy::CloseConn>(&newMsg.msg)) {
-                authedPubkeys.erase(msg->connId);
                 queries.closeConn(msg->connId);
                 views.closeConn(msg->connId);
             }

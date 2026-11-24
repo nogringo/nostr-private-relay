@@ -27,6 +27,10 @@ void parseAndVerifyEvent(const tao::json::value &origJson, secp256k1_context *se
 std::optional<defaultDb::environment::View_Event> lookupEventById(lmdb::txn &txn, std::string_view id);
 defaultDb::environment::View_Event lookupEventByLevId(lmdb::txn &txn, uint64_t levId); // throws if can't find
 uint64_t getMostRecentLevId(lmdb::txn &txn);
+uint64_t getMostRecentUploadId(lmdb::txn &txn);
+std::optional<uint64_t> lookupUpload(lmdb::txn &txn, std::string_view uploader, uint64_t levId);
+std::string defaultUploader(const PackedEventView &packed);
+void addMissingUploads(lmdb::txn &txn);
 std::string_view decodeEventPayload(lmdb::txn &txn, Decompressor &decomp, std::string_view raw, uint32_t *outDictId, size_t *outCompressedSize);
 std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t levId);
 std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t levId, std::string_view eventPayload);
@@ -68,12 +72,13 @@ struct EventToWrite {
     std::string packedStr;
     std::string jsonStr;
     void *userData = nullptr;
+    std::string uploader; // defaultUploader() when empty
     EventWriteStatus status = EventWriteStatus::Pending;
     uint64_t levId = 0;
 
     EventToWrite() {}
 
-    EventToWrite(std::string packedStr, std::string jsonStr, void *userData = nullptr) : packedStr(packedStr), jsonStr(jsonStr), userData(userData) {
+    EventToWrite(std::string packedStr, std::string jsonStr, void *userData = nullptr, std::string uploader = "") : packedStr(packedStr), jsonStr(jsonStr), userData(userData), uploader(std::move(uploader)) {
     }
 
     // FIXME: do we need these methods anymore?
@@ -89,8 +94,9 @@ struct EventToWrite {
 
 void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vector<EventToWrite> &evs, bool logDeletions = true);
 bool isVanishRequestForThisRelay(const tao::json::value &evJson);
-void collectOwnedEvents(lmdb::txn &txn, std::string_view pubkey, uint64_t until, std::vector<uint64_t> &levIds);
+uint64_t erasePubkey(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::string_view pubkey);
 bool deleteEventBasic(lmdb::txn &txn, uint64_t levId);
+bool holdsMostRecentUpload(lmdb::txn &txn, uint64_t levId, uint64_t mostRecentUploadId);
 
 template <typename C>
 uint64_t deleteEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, const C &levIds) {

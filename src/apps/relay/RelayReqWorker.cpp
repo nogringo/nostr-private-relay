@@ -1,19 +1,10 @@
 #include "RelayServer.h"
 #include "QueryScheduler.h"
-#include "ReadRestrictor.h"
 
 
 void RelayServer::runReqWorker(ThreadPool<MsgReqWorker>::Thread &thr) {
     Decompressor decomp;
     QueryScheduler queries;
-    AuthedPubkeysByConn authedPubkeys;
-
-    queries.accept = [&](lmdb::txn &txn, const auto &sub, uint64_t levId){
-        // Without private storage, COUNT is checked per filter instead, by isFilterAllowedToCount
-        if (sub.countOnly && !ReadRestrictor::authorOnly()) return true;
-        auto ev = lookupEventByLevId(txn, levId);
-        return ReadRestrictor::shouldSendToSubscriber(PackedEventView(ev.buf), authedPubkeys.get(sub.connId));
-    };
 
     queries.onEvent = [&](lmdb::txn &txn, const auto &sub, uint64_t levId, std::string_view eventPayload){
         if (sub.countOnly) return;
@@ -57,13 +48,10 @@ void RelayServer::runReqWorker(ThreadPool<MsgReqWorker>::Thread &thr) {
                 }
 
                 queries.process(txn);
-            } else if (auto msg = std::get_if<MsgReqWorker::AddAuth>(&newMsg.msg)) {
-                authedPubkeys.add(msg->connId, msg->pubkey);
             } else if (auto msg = std::get_if<MsgReqWorker::RemoveSub>(&newMsg.msg)) {
                 queries.removeSub(msg->connId, msg->subId);
                 tpReqMonitor.dispatch(msg->connId, MsgReqMonitor{MsgReqMonitor::RemoveSub{msg->connId, msg->subId}});
             } else if (auto msg = std::get_if<MsgReqWorker::CloseConn>(&newMsg.msg)) {
-                authedPubkeys.erase(msg->connId);
                 queries.closeConn(msg->connId);
                 tpReqMonitor.dispatch(msg->connId, MsgReqMonitor{MsgReqMonitor::CloseConn{msg->connId}});
             }

@@ -139,7 +139,12 @@ struct WriterPipeline {
                         numLive--;
 
                         PackedEventView packed(event.packedStr);
-                        if (lookupEventById(txn, packed.id())) {
+                        auto existing = lookupEventById(txn, packed.id());
+
+                        // An event another pubkey stored is still new to this one
+                        if (existing && !lookupUpload(txn, event.uploader.size() ? event.uploader : defaultUploader(packed), existing->primaryKeyId)) existing.reset();
+
+                        if (existing) {
                             dups++;
                             totalDups++;
                             continue;

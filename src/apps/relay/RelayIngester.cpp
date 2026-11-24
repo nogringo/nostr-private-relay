@@ -1,14 +1,9 @@
 #include "RelayServer.h"
 #include "RelayUrl.h"
 #include "jsonParseUtils.h"
-#include "ReadRestrictor.h"
 #include "AccessControl.h"
 #include "Webhooks.h"
 
-
-static bool privateStorage() {
-    return cfg().relay__auth__authorOnlyReads || cfg().relay__auth__authorOnlyWrites;
-}
 
 static const AuthedPubkeys &sessionPubkeys(const RelayServerCtx &rsctx, uint64_t connId) {
     static const AuthedPubkeys none;
@@ -30,7 +25,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
         for (auto &newMsg : newMsgs) {
             if (auto msg = std::get_if<MsgIngester::NewConn>(&newMsg.msg)) {
                 // Nothing works here without AUTH, so let clients sign in before their first request
-                if (privateStorage() && cfg().relay__auth__serviceUrl.size()) {
+                if (cfg().relay__auth__serviceUrl.size()) {
                     sendAuthChallenge(msg->connId, ingesterChallenge(rsctx, msg->connId));
                 }
             } else if (auto msg = std::get_if<MsgIngester::ClientMessage>(&newMsg.msg)) {
@@ -144,8 +139,17 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
     parseAndVerifyEvent(origJson, rsctx.secpCtx, true, true, packedStr, jsonStr);
 
     PackedEventView packed(packedStr);
-    Bytes32 authedPubkey;
     bool isVanishRequest = isVanishRequestForThisRelay(origJson);
+    const auto &authed = sessionPubkeys(rsctx, connId);
+
+    // NIP-37: who stores the event, which only they can read back. Its owner when authenticated,
+    // otherwise the first pubkey this connection authenticated as.
+    std::string uploader;
+
+    if (!authed.empty()) {
+        auto owner = ownerOf(packed);
+        uploader = std::string(owner.size() && authed.contains(owner) ? owner : authed.pubkeys[0].sv());
+    }
 
     {
         // discard reposts that embed protected events
@@ -169,19 +173,11 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         });
 
         // NIP-62: a request to vanish is signed by the pubkey it erases, so it needs no AUTH
-        bool ownerOnly = cfg().relay__auth__authorOnlyWrites && !isVanishRequest;
-
-        if (foundProtected || ownerOnly) {
+        if (foundProtected || !isVanishRequest) {
             // NIP-70 protected events must be rejected unless published by an authenticated public key
             // that matches the event author, so we do all the AUTH flow here
 
             auto idHex = to_hex(packed.id());
-
-            if (foundProtected && !cfg().relay__auth__enabled) {
-                LI << "[" << connId << "] Protected event and auth disabled, rejecting: " << idHex;
-                sendOKResponse(connId, idHex, false, "blocked: event marked as protected");
-                return;
-            }
 
             if (cfg().relay__auth__serviceUrl.empty()) {
                 LI << "[" << connId << "] Event needs AUTH and no serviceUrl configured, rejecting: " << idHex;
@@ -189,38 +185,29 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
                 return;
             }
 
-            const auto &authed = sessionPubkeys(rsctx, connId);
-            Bytes32 owner = ReadRestrictor::authedOwner(packed, authed);
-
-            bool allowed = (!foundProtected || authed.contains(packed.pubkey())) && (!ownerOnly || !owner.isNull());
-
-            if (!allowed) {
-                if (authed.empty()) {
-                    LI << "[" << connId << "] Event needs AUTH, requesting it: " << idHex;
-                    sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
-                    sendOKResponse(connId, idHex, false, foundProtected ? "auth-required: event marked as protected" : "auth-required: this relay only stores events of authenticated users");
-                } else {
-                    sendOKResponse(connId, idHex, false, foundProtected ? "restricted: must be published by the author" : "restricted: this relay only stores events from their author, or gift wraps with a single p tag from that recipient");
-                }
+            if (authed.empty()) {
+                LI << "[" << connId << "] Event needs AUTH, requesting it: " << idHex;
+                sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+                sendOKResponse(connId, idHex, false, foundProtected ? "auth-required: event marked as protected" : "auth-required: this relay only stores events of authenticated users");
                 return;
             }
 
-            // otherwise we proceed to accept the event
-            authedPubkey = owner;
+            if (foundProtected && !authed.contains(packed.pubkey())) {
+                sendOKResponse(connId, idHex, false, "restricted: must be published by the author");
+                return;
+            }
         }
     }
 
-    auto owner = ReadRestrictor::ownerOf(packed);
-
-    // Nobody could read such a wrap, yet it would still use up the limit of its recipients' REQs
-    if (owner.empty() && ReadRestrictor::authorOnly()) {
+    // NIP-59: a gift wrap has a single recipient, who can delete it
+    if (ownerOf(packed).empty()) {
         sendOKResponse(connId, to_hex(packed.id()), false, "invalid: this relay only stores gift wraps with a single p tag");
         return;
     }
 
     // Banned pubkeys can still vanish
     if (!isVanishRequest) {
-        auto refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
+        auto refusal = AccessControl::refusal(txn, uploader);
 
         if (refusal.size()) {
             sendOKResponse(connId, to_hex(packed.id()), false, "blocked: " + refusal);
@@ -237,6 +224,12 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
             return;
         }
 
+        // Its pushes go to its author, so nobody else may store it
+        if (uploader != packed.pubkey()) {
+            sendOKResponse(connId, to_hex(packed.id()), false, "restricted: a webhook subscription can only be stored by its author");
+            return;
+        }
+
         webhookCallback = Webhooks::parse(origJson).callback;
 
         if (Webhooks::countOtherSubscriptions(txn, packed) >= cfg().relay__webhooks__maxSubscriptionsPerPubkey) {
@@ -246,8 +239,10 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
     }
 
     {
+        // An event another pubkey stored is still new to this one
         auto existing = lookupEventById(txn, packed.id());
-        if (existing) {
+
+        if (existing && lookupUpload(txn, uploader.size() ? uploader : defaultUploader(packed), existing->primaryKeyId)) {
             auto hexId = to_hex(packed.id());
             LI << "[" << connId << "] Duplicate event, skipping: " << hexId;
             sendOKResponse(connId, hexId, true, "duplicate: have this event");
@@ -255,8 +250,8 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         }
     }
 
-    bool fromOwner = Webhooks::active() && ReadRestrictor::isOwnedBy(packed, sessionPubkeys(rsctx, connId));
-    MsgWriter::AddEvent addEvent{connId, std::move(ipAddr), std::move(packedStr), std::move(jsonStr), authedPubkey, fromOwner};
+    Bytes32 authedPubkey = uploader.size() ? Bytes32(uploader) : Bytes32();
+    MsgWriter::AddEvent addEvent{connId, std::move(ipAddr), std::move(packedStr), std::move(jsonStr), authedPubkey, std::move(uploader)};
 
     if (webhookCallback.size()) {
         verifyWebhook(std::move(addEvent), std::move(webhookCallback));
@@ -291,52 +286,14 @@ void RelayServer::ingesterProcessReq(lmdb::txn &txn, RelayServerCtx &rsctx, uint
 
     const auto &authed = sessionPubkeys(rsctx, connId);
 
-    if (ReadRestrictor::authorOnly()) {
-        if (authed.empty()) {
-            sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
-            sendClosedError(connId, outSubIdStr, "auth-required: this relay only serves events to their authenticated author");
-            return;
-        }
-
-        bool restricted = false;
-        auto ownFilters = ReadRestrictor::narrowFilters(std::span<const tao::json::value>(arr.get_array()).subspan(2), authed, maxFilterLimit, restricted);
-
-        if (restricted) {
-            sendClosedError(connId, outSubIdStr, "restricted: this relay only serves events to their author");
-            return;
-        }
-
-        Subscription sub(connId, outSubIdStr, std::move(ownFilters), countOnly);
-        tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::NewSub{std::move(sub)}});
+    if (authed.empty()) {
+        sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+        sendClosedError(connId, outSubIdStr, "auth-required: this relay only serves events to the authenticated user who stored them");
         return;
     }
 
-    bool shouldRejectReq = false;
-
-    if (countOnly) {
-        // COUNT can't be filtered per event, so a restricted-kind filter must be
-        // scoped to the client's own pubkeys via authors/#p.
-        shouldRejectReq = !ReadRestrictor::isFilterAllowedToCount(filterGroup, authed);
-    } else {
-        // if the filter group contains no filter that has a kind that is not restricted,
-        // that means an unauthenticated client won't be able to see anything
-        if (ReadRestrictor::isFilterGroupFullyRestricted(filterGroup)) {
-            shouldRejectReq = authed.empty();
-        }
-    }
-
-    if (shouldRejectReq) {
-        if (countOnly && !authed.empty()) {
-            sendClosedError(connId, outSubIdStr, "count-failed: can only count events you are involved in");
-        } else {
-            sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
-            sendClosedError(connId, outSubIdStr, "auth-required: requested filter requires authentication");
-        }
-        return;
-    }
-
-    Subscription sub(connId, outSubIdStr, std::move(filterGroup), countOnly);
-
+    // NIP-37: a subscription only ever sees what its connection's pubkeys uploaded
+    Subscription sub(connId, outSubIdStr, std::move(filterGroup), countOnly, authed);
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::NewSub{std::move(sub)}});
 }
 
@@ -407,10 +364,6 @@ void RelayServer::ingesterProcessAuth(lmdb::txn &txn, RelayServerCtx &rsctx, uin
     bool firstPubkey = as.authed.empty();
     as.authed.add(pubkey);
 
-    tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::AddAuth{connId, pubkey}});
-    tpReqMonitor.dispatch(connId, MsgReqMonitor{MsgReqMonitor::AddAuth{connId, pubkey}});
-    tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::AddAuth{connId, pubkey}});
-
     PrometheusMetrics::getInstance().authSuccessTotal.inc();
     if (firstPubkey) PrometheusMetrics::getInstance().authenticatedConnections.inc();
 
@@ -447,53 +400,21 @@ void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, RelayServerCtx &rsct
         NostrFilter requested(filterJson, maxFilterLimit);
 
         const auto &authed = sessionPubkeys(rsctx, connId);
-        std::vector<tao::json::value> filters;
 
-        if (ReadRestrictor::authorOnly()) {
-            if (authed.empty()) {
-                sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
-                sendNegErr("auth-required: this relay only serves events to their authenticated author");
-                return;
-            }
-
-            if (requested.neverMatch) {
-                filters.push_back(filterJson);
-            } else {
-                ReadRestrictor::narrowFilter(filterJson, authed, filters);
-
-                if (filters.empty()) {
-                    sendNegErr("restricted: this relay only serves events to their author");
-                    return;
-                }
-            }
-        } else {
-            // if the filter group contains no filter that has a kind that is not restricted,
-            // that means an unauthenticated client won't be able to see anything
-            if (ReadRestrictor::isFilterGroupFullyRestricted(NostrFilterGroup(filterJson, maxFilterLimit)) && authed.empty()) {
-                sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
-                sendNegErr("auth-required: requested filter requires authentication");
-                return;
-            }
-
-            filters.push_back(filterJson);
+        if (authed.empty()) {
+            sendAuthChallenge(connId, ingesterChallenge(rsctx, connId));
+            sendNegErr("auth-required: this relay only serves events to the authenticated user who stored them");
+            return;
         }
 
         NostrFilterGroup filterGroup;
-        for (const auto &f : filters) filterGroup.addFilter(f, maxFilterLimit);
+        filterGroup.addFilter(filterJson, maxFilterLimit);
 
-        Subscription sub(connId, subscriptionStr, std::move(filterGroup));
-
-        // A pre-computed negentropy tree stands for exactly one filter
-        std::string filterStr;
-        if (filters.size() == 1) {
-            filters[0].get_object().erase("since");
-            filters[0].get_object().erase("until");
-            filterStr = tao::json::to_string(filters[0]);
-        }
+        Subscription sub(connId, subscriptionStr, std::move(filterGroup), false, authed);
 
         std::string negPayload = from_hex(jsonGetString(vals[3], "negentropy payload not a string"));
 
-        tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegOpen{std::move(sub), std::move(filterStr), std::move(negPayload)}});
+        tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegOpen{std::move(sub), std::move(negPayload)}});
     } else if (cmd == "NEG-MSG") {
         if (vals.size() < 3) throw herr("negentropy message missing elements");
 

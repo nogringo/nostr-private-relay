@@ -86,16 +86,23 @@ struct ActiveMonitors : NonCopyable {
     }
 
     void process(lmdb::txn &txn, defaultDb::environment::View_Event &ev, const std::function<void(RecipientList &&, uint64_t)> &cb) {
+        process(txn, ev, ev.primaryKeyId, "", cb);
+    }
+
+    // For subscriptions scoped to their uploaders, seq is the id of this upload of the event
+    void process(lmdb::txn &txn, defaultDb::environment::View_Event &ev, uint64_t seq, std::string_view uploader, const std::function<void(RecipientList &&, uint64_t)> &cb) {
         RecipientList recipients;
 
         auto processMonitorSet = [&](MonitorSet &ms){
             for (auto &[f, item] : ms) {
-                if (item.latestEventId >= ev.primaryKeyId || item.mon->sub.latestEventId >= ev.primaryKeyId) continue;
-                item.latestEventId = ev.primaryKeyId;
+                if (item.latestEventId >= seq || item.mon->sub.latestEventId >= seq) continue;
+                item.latestEventId = seq;
+
+                if (uploader.size() && !item.mon->sub.uploaders.contains(uploader)) continue;
 
                 if (f->doesMatch(PackedEventView(ev.buf))) {
                     recipients.emplace_back(item.mon->sub.connId, item.mon->sub.subId);
-                    item.mon->sub.latestEventId = ev.primaryKeyId;
+                    item.mon->sub.latestEventId = seq;
                     continue;
                 }
             }

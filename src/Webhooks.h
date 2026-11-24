@@ -16,7 +16,6 @@
 #include "events.h"
 #include "filters.h"
 #include "RelayUrl.h"
-#include "ReadRestrictor.h"
 
 
 // NIP-9a: a kind 30390 event asks the relay to POST the events matching its filters to its callback URL
@@ -24,9 +23,8 @@ namespace Webhooks {
 
 const uint64_t subscriptionKind = 30390;
 
-// Without private storage, the relay can't tell whose events a subscription may receive
 inline bool active() {
-    return cfg().relay__webhooks__enabled && ReadRestrictor::authorOnly() && cfg().relay__auth__serviceUrl.size();
+    return cfg().relay__webhooks__enabled && cfg().relay__auth__serviceUrl.size();
 }
 
 // Like welshman's normalizeRelayUrl, which clients compare relay URLs with: "wss://Relay.example.com" -> "wss://relay.example.com/"
@@ -174,7 +172,6 @@ struct Subscription {
     std::string pubkey;
     std::string callback;
     bool includeEvent = false;
-    bool ignoreSelf = false;
     NostrFilterGroup filters;
     NostrFilterGroup ignore;
 };
@@ -214,11 +211,6 @@ inline Subscription parse(const tao::json::value &evJson) {
 
         if (name == "include_event") {
             sub.includeEvent = true;
-            continue;
-        }
-
-        if (name == "ignore_self") {
-            sub.ignoreSelf = true;
             continue;
         }
 

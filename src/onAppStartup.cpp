@@ -10,6 +10,7 @@
 
 #include <negentropy/storage/BTreeLMDB.h>
 
+#include "events.h"
 #include "AnsiLogo.h"
 #include "app_git_version.h"
 
@@ -69,7 +70,12 @@ static void dbCheck(lmdb::txn &txn, const std::string &cmd) {
 
     if (s->dbVersion() < CURR_DB_VERSION) {
         if (cmd == "export" || cmd == "info") return;
-        dbTooOld(s->dbVersion());
+        if (s->dbVersion() != 3) dbTooOld(s->dbVersion());
+
+        addMissingUploads(txn);
+        env.update_Meta(txn, *s, { .dbVersion = CURR_DB_VERSION });
+        LI << "Upgraded the DB to version " << CURR_DB_VERSION;
+        return;
     }
 
     if (s->dbVersion() > CURR_DB_VERSION) {

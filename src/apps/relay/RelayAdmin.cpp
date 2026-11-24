@@ -4,7 +4,6 @@
 
 #include "RelayServer.h"
 #include "RelayUrl.h"
-#include "ReadRestrictor.h"
 #include "AccessControl.h"
 #include "app_git_version.h"
 
@@ -136,22 +135,25 @@ tao::json::value stats(lmdb::txn &txn, uint64_t startTime, uint64_t limit) {
     flat_hash_map<std::string, Usage> usageByOwner;
     uint64_t totalEvents = 0, totalBytes = 0;
 
-    env.foreach_Event(txn, [&](auto &ev){
-        PackedEventView packed(ev.buf);
-
-        auto owner = ReadRestrictor::ownerOf(packed);
-        if (owner.empty()) owner = packed.pubkey();
-
+    auto payloadSize = [&](uint64_t levId) -> uint64_t {
         std::string_view payload;
-        uint64_t size = env.dbi_EventPayload.get(txn, lmdb::to_sv<uint64_t>(ev.primaryKeyId), payload) ? payload.size() : 0;
+        return env.dbi_EventPayload.get(txn, lmdb::to_sv<uint64_t>(levId), payload) ? payload.size() : 0;
+    };
 
-        auto &usage = usageByOwner[std::string(owner)];
-        usage.events++;
-        usage.bytes += size;
-        usage.lastCreatedAt = std::max(usage.lastCreatedAt, packed.created_at());
-
+    env.foreach_Event(txn, [&](auto &ev){
         totalEvents++;
-        totalBytes += size;
+        totalBytes += payloadSize(ev.primaryKeyId);
+        return true;
+    });
+
+    // NIP-37: an event counts for each pubkey that stored it
+    env.foreach_Upload(txn, [&](auto &upload){
+        UploadView view(upload.buf);
+
+        auto &usage = usageByOwner[std::string(view.uploader())];
+        usage.events++;
+        usage.bytes += payloadSize(view.levId());
+        usage.lastCreatedAt = std::max(usage.lastCreatedAt, view.created_at());
         return true;
     });
 
@@ -272,11 +274,11 @@ tao::json::value importLines(secp256k1_context *secpCtx, std::string_view body) 
             }
 
             PackedEventView packed(packedStr);
-            auto owner = ReadRestrictor::ownerOf(packed);
+            auto owner = ownerOf(packed);
             std::string refusal;
 
-            if (owner.empty() && (cfg().relay__auth__authorOnlyWrites || ReadRestrictor::authorOnly())) refusal = "this relay only stores gift wraps with a single p tag";
-            else if (!isVanishRequest) refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
+            if (owner.empty()) refusal = "this relay only stores gift wraps with a single p tag";
+            else if (!isVanishRequest) refusal = AccessControl::refusal(txn, owner);
 
             if (refusal.size()) {
                 refused++;
@@ -417,10 +419,8 @@ static tao::json::value handleMethod(RelayServer &server, const std::string &met
         auto pubkey = AccessControl::parsePubkey(param(0));
 
         auto txn = env.txn_rw();
-        std::vector<uint64_t> levIds;
-        collectOwnedEvents(txn, pubkey, MAX_U64, levIds);
         NegentropyFilterCache neFilterCache;
-        uint64_t deleted = deleteEvents(txn, neFilterCache, levIds);
+        uint64_t deleted = erasePubkey(txn, neFilterCache, pubkey);
         txn.commit();
 
         return deleted;

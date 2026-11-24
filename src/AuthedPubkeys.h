@@ -25,21 +25,3 @@ struct AuthedPubkeys {
         if (!contains(pubkey.sv())) pubkeys.push_back(pubkey);
     }
 };
-
-struct AuthedPubkeysByConn {
-    flat_hash_map<uint64_t, AuthedPubkeys> conns;
-
-    const AuthedPubkeys &get(uint64_t connId) const {
-        static const AuthedPubkeys none;
-        auto it = conns.find(connId);
-        return it == conns.end() ? none : it->second;
-    }
-
-    void add(uint64_t connId, const Bytes32 &pubkey) {
-        conns[connId].add(pubkey);
-    }
-
-    void erase(uint64_t connId) {
-        conns.erase(connId);
-    }
-};

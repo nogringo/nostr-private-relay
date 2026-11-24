@@ -34,8 +34,7 @@ function sign(user, { kind = 1, tags = [], content = "", created_at = now() } = 
 
 function writeRelayConfig(webhooks, options = {}) {
   writeConfig(
-    config(dbDir, port, true, {
-      privateStorage: true,
+    config(dbDir, port, {
       ...options,
       webhooks: { maxSubscriptionsPerPubkey, allowHttp: true, ...webhooks },
     }),
@@ -266,7 +265,7 @@ async function testPushesMatchingEvents({ aliceConn }) {
   pass("testPushesMatchingEvents");
 }
 
-async function testOnlyOwnEvents({ aliceConn, bobConn }) {
+async function testOnlyOwnUploads({ aliceConn, bobConn }) {
   await store(aliceConn, subscription(alice, "wraps", { filters: [{ kinds: [1059] }], callback: callbacks.url("/wraps") }));
 
   const bobNote = await store(bobConn, sign(bob, { content: "bob's note" }));
@@ -277,10 +276,22 @@ async function testOnlyOwnEvents({ aliceConn, bobConn }) {
 
   await callbacks.waitFor("/wraps", forAlice.id);
   await delay(300);
-  expect(!callbacks.to("/notes").some((p) => p.body.id === bobNote.id), "another user's events must not be pushed");
-  expect(!callbacks.to("/wraps").some((p) => p.body.id === forBob.id), "a gift wrap for someone else must not be pushed");
+  expect(!callbacks.to("/notes").some((p) => p.body.id === bobNote.id), "what another user stores must not be pushed");
+  expect(!callbacks.to("/wraps").some((p) => p.body.id === forBob.id), "a gift wrap someone else stored must not be pushed");
 
-  pass("testOnlyOwnEvents");
+  // NIP-37: a copy alice stores is new to her, whoever signed it
+  await store(aliceConn, bobNote);
+  await callbacks.waitFor("/notes", bobNote.id);
+
+  await store(bobConn, forAlice);
+  const later = await store(aliceConn, wrap(alice));
+  await callbacks.waitFor("/wraps", later.id);
+  expect(
+    callbacks.to("/wraps").filter((p) => p.body.id === forAlice.id).length === 1,
+    "bob storing a copy of alice's gift wrap must not push it to alice again",
+  );
+
+  pass("testOnlyOwnUploads");
 }
 
 async function testSubscriptionsAreNeverPushed({ aliceConn }) {
@@ -354,42 +365,12 @@ async function testSubscriptionLimit({ bobConn }) {
   pass("testSubscriptionLimit");
 }
 
-async function testIgnoreSelf({ aliceConn, bobConn }) {
-  const dms = { kinds: [1059], "#p": [alice.pub] };
-  await store(aliceConn, subscription(alice, "dm-all", { filters: [dms], callback: callbacks.url("/dm-all") }));
-  await store(aliceConn, subscription(alice, "dm-inbox", { filters: [dms], callback: callbacks.url("/dm-inbox"), extraTags: [["ignore_self"]] }));
+async function testOnlyTheAuthorStoresASubscription({ bobConn }) {
+  const ok = await publish(bobConn, subscription(alice, "copied", { filters: [{ kinds: [1] }], callback: callbacks.url("/copied") }));
+  expect(ok[2] === false && ok[3].startsWith("restricted:"), `only its author may store a subscription, got: ${ok[3]}`);
+  expect(!callbacks.challenges.some((c) => c.path === "/copied"), "a refused subscription must not reach its callback");
 
-  // Bob can only send Alice a gift wrap while anyone can write
-  const wrapForAlice = () => sign(newUser(), { kind: 1059, tags: [["p", alice.pub]], content: "sealed" });
-  const bobCanWrite = async (expected) => {
-    const deadline = Date.now() + 3_000;
-    let ev, ok;
-    do {
-      await delay(100);
-      ev = wrapForAlice();
-      ok = await publish(bobConn, ev);
-    } while (ok[2] !== expected && Date.now() < deadline);
-    expect(ok[2] === expected, `bob's gift wrap for alice should be ${expected ? "stored" : "refused"}, got: ${ok[3]}`);
-    return ev;
-  };
-
-  writeRelayConfig({ allowPrivateAddresses: true }, { authorOnlyWrites: false });
-  const received = await bobCanWrite(true);
-  const selfCopy = await store(aliceConn, wrapForAlice());
-
-  await callbacks.waitFor("/dm-inbox", received.id);
-  await callbacks.waitFor("/dm-all", received.id);
-  await callbacks.waitFor("/dm-all", selfCopy.id);
-  await delay(300);
-  expect(
-    !callbacks.to("/dm-inbox").some((p) => p.body.id === selfCopy.id),
-    "with ignore_self, an event sent over a connection AUTHed as the subscription's author must not be pushed",
-  );
-
-  writeRelayConfig({ allowPrivateAddresses: true });
-  await bobCanWrite(false);
-
-  pass("testIgnoreSelf");
+  pass("testOnlyTheAuthorStoresASubscription");
 }
 
 async function testPrivateAddresses({ aliceConn }) {
@@ -475,12 +456,12 @@ async function main() {
           await testRefusedSubscriptions(conns);
           await testCallbackVerification(conns);
           await testPushesMatchingEvents(conns);
-          await testOnlyOwnEvents(conns);
+          await testOnlyOwnUploads(conns);
           await testSubscriptionsAreNeverPushed(conns);
           await testReplacementKeepsPushing(conns);
           await testRemovedOn404(conns);
           await testSubscriptionLimit(conns);
-          await testIgnoreSelf(conns);
+          await testOnlyTheAuthorStoresASubscription(conns);
           await testPrivateAddresses(conns);
           await testDisabled(conns);
         } finally {

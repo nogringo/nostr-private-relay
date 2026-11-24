@@ -20,7 +20,7 @@ const size_t maxQueuedVerifications = 1'000;
 struct StoredSubscription {
     std::string eventId;
     std::string address; // pubkey + d tag
-    uint64_t since; // only events stored after this levId are pushed
+    uint64_t since; // only uploads after this upload id are pushed
     bool gone = false; // its callback answered 404
     std::optional<Webhooks::Subscription> sub; // empty when the relay won't fulfill it
 };
@@ -106,7 +106,7 @@ void RelayServer::runWebhooks() {
     flat_hash_map<std::string, uint64_t> verificationsByPubkey; // queued or running
     size_t runningVerifications = 0;
     flat_hash_map<CURL*, std::unique_ptr<Transfer>> transfers;
-    uint64_t currEventId = MAX_U64;
+    uint64_t currUploadId = MAX_U64;
     uint64_t configVer = 0;
     std::string userAgent = std::string("nostr-private-relay/") + APP_GIT_VERSION;
 
@@ -157,11 +157,12 @@ void RelayServer::runWebhooks() {
             PackedEventView packed(lookupEventByLevId(txn, levId).buf);
             auto address = std::string(packed.pubkey()) + std::string(Webhooks::dTag(packed));
             auto since = sinceByAddress.find(address);
+            uint64_t uploadId = lookupUpload(txn, packed.pubkey(), levId).value_or(MAX_U64);
 
             auto &stored = subs.try_emplace(levId, StoredSubscription{
                 std::string(packed.id()),
                 address,
-                since == sinceByAddress.end() ? levId : std::min(since->second, levId),
+                since == sinceByAddress.end() ? uploadId : std::min(since->second, uploadId),
             }).first->second;
 
             loadSubscription(txn, levId, stored);
@@ -173,45 +174,27 @@ void RelayServer::runWebhooks() {
         }
     };
 
-    // The events up to this levId that came over a connection AUTHed as their owner
-    auto takeOwnerWrites = [&](uint64_t upTo){
-        flat_hash_set<uint64_t> taken;
-        std::lock_guard<std::mutex> lock(webhooksInbox.mutex);
-
-        erase_if(webhooksInbox.ownerWrites, [&](uint64_t levId){
-            if (levId > upTo) return false;
-            taken.insert(levId);
-            return true;
-        });
-
-        return taken;
-    };
-
-    auto collectDeliveries = [&](lmdb::txn &txn, defaultDb::environment::View_Event &ev, const flat_hash_set<uint64_t> &ownerWrites){
+    // NIP-37: an upload is new to the pubkey that stored it, whoever signed the event
+    auto collectDeliveries = [&](lmdb::txn &txn, uint64_t uploadId, const UploadView &upload, defaultDb::environment::View_Event &ev){
         PackedEventView packed(ev.buf);
 
         // NIP-9a: subscriptions are only served to their author, and their callbacks are secrets
         if (packed.kind() == Webhooks::subscriptionKind) return;
 
-        auto owner = ReadRestrictor::ownerOf(packed);
-        if (owner.empty()) return;
-
-        auto found = subsByOwner.find(std::string(owner));
+        auto found = subsByOwner.find(std::string(upload.uploader()));
         if (found == subsByOwner.end()) return;
 
-        bool fromOwner = ownerWrites.contains(ev.primaryKeyId);
-        std::optional<bool> ownerRefused;
+        std::optional<bool> uploaderRefused;
         std::string eventIdJson;
 
         for (auto &[subLevId, stored] : found->second) {
             const auto &sub = *stored->sub;
 
-            if (stored->gone || ev.primaryKeyId <= stored->since) continue;
-            if (sub.ignoreSelf && fromOwner) continue;
+            if (stored->gone || uploadId <= stored->since) continue;
             if (!sub.filters.doesMatch(packed) || sub.ignore.doesMatch(packed)) continue;
 
-            if (!ownerRefused) ownerRefused = AccessControl::refusal(txn, owner).size() > 0;
-            if (*ownerRefused) return;
+            if (!uploaderRefused) uploaderRefused = AccessControl::refusal(txn, upload.uploader()).size() > 0;
+            if (*uploaderRefused) return;
 
             if (queue.size() >= maxQueuedRequests) {
                 LW << "Webhook queue full, dropping a POST to " << Webhooks::callbackHost(sub.callback);
@@ -284,10 +267,11 @@ void RelayServer::runWebhooks() {
         tpWriter.dispatch(connId, MsgWriter{std::move(v.event)});
     };
 
-    // Deleting the most recent event would let the next one reuse its levId, which monitors would never see
+    // Deleting the most recent event or upload would let the next one reuse its id, which monitors would never see
     auto runPendingDeletions = [&]{
         auto txn = env.txn_rw();
         auto mostRecent = getMostRecentLevId(txn);
+        auto mostRecentUpload = getMostRecentUploadId(txn);
         std::vector<uint64_t> levIds;
         decltype(pendingDeletions) stillPending;
 
@@ -295,7 +279,7 @@ void RelayServer::runWebhooks() {
             auto ev = env.lookup_Event(txn, levId);
             if (!ev || PackedEventView(ev->buf).id() != eventId) continue;
 
-            if (levId == mostRecent) stillPending.emplace_back(levId, eventId);
+            if (levId == mostRecent || holdsMostRecentUpload(txn, levId, mostRecentUpload)) stillPending.emplace_back(levId, eventId);
             else levIds.push_back(levId);
         }
 
@@ -429,23 +413,22 @@ void RelayServer::runWebhooks() {
 
             try {
                 auto txn = env.txn_ro();
-                uint64_t latestEventId = getMostRecentLevId(txn);
-                if (currEventId > latestEventId) currEventId = latestEventId;
-
-                auto ownerWrites = takeOwnerWrites(latestEventId);
+                uint64_t latestUploadId = getMostRecentUploadId(txn);
+                if (currUploadId > latestUploadId) currUploadId = latestUploadId;
 
                 if (Webhooks::active()) {
                     refreshSubscriptions(txn);
 
                     if (subsByOwner.size()) {
-                        env.foreach_Event(txn, [&](auto &ev){
-                            collectDeliveries(txn, ev, ownerWrites);
+                        env.foreach_Upload(txn, [&](auto &upload){
+                            UploadView view(upload.buf);
+                            if (auto ev = env.lookup_Event(txn, view.levId())) collectDeliveries(txn, upload.primaryKeyId, view, *ev);
                             return true;
-                        }, false, currEventId + 1);
+                        }, false, currUploadId + 1);
                     }
                 }
 
-                currEventId = latestEventId;
+                currUploadId = latestUploadId;
             } catch (std::exception &e) {
                 LE << "Webhooks: " << e.what();
             }

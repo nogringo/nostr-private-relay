@@ -13,6 +13,7 @@ includes: |
     #include "golpe.h"
     #include "global.h"
     #include "PackedEvent.h"
+    #include "UploadView.h"
     #include "EventUtils.h"
 
 tables:
@@ -90,6 +91,28 @@ tables:
         if (packed.expiration() != 0) {
             expiration.push_back(packed.expiration());
         }
+
+  ## NIP-37: who stored each event. In private storage an event is only served to the pubkeys
+  ## that uploaded it, whoever signed it. Layout in Uploads.h
+  Upload:
+    opaque: true
+
+    indices:
+      levId:
+        integer: true
+      uploaderLevId:
+        unique: true
+      uploader:
+        comparator: StringUint64
+      uploaderKind:
+        comparator: StringUint64Uint64
+
+    indexPrelude: |
+        UploadView upload(v.buf);
+        levId = upload.levId();
+        uploaderLevId = upload.uploaderLevIdKey();
+        uploader = makeKey_StringUint64(upload.uploader(), upload.created_at());
+        uploaderKind = makeKey_StringUint64Uint64(upload.uploader(), upload.kind(), upload.created_at());
 
   CompressionDictionary:
     fields:

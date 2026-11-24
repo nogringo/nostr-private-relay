@@ -128,7 +128,7 @@ struct MsgWriter : NonCopyable {
         std::string packedStr;
         std::string jsonStr;
         Bytes32 authed;
-        bool fromOwner = false; // received over a connection AUTHed as its owner, for NIP-9a ignore_self
+        std::string uploader; // empty: writeEvents() picks defaultUploader()
     };
 
     struct CloseConn {
@@ -149,18 +149,12 @@ struct WebhookVerification {
 struct WebhooksInbox {
     std::mutex mutex;
     std::deque<WebhookVerification> verifications;
-    flat_hash_set<uint64_t> ownerWrites; // levIds of fromOwner events, added before their commit
     CURLM *multi = nullptr; // woken up by each new verification
 };
 
 struct MsgReqWorker : NonCopyable {
     struct NewSub {
         Subscription sub;
-    };
-
-    struct AddAuth {
-        uint64_t connId;
-        Bytes32 pubkey;
     };
 
     struct RemoveSub {
@@ -172,7 +166,7 @@ struct MsgReqWorker : NonCopyable {
         uint64_t connId;
     };
 
-    using Var = std::variant<NewSub, AddAuth, RemoveSub, CloseConn>;
+    using Var = std::variant<NewSub, RemoveSub, CloseConn>;
     Var msg;
     MsgReqWorker(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -180,11 +174,6 @@ struct MsgReqWorker : NonCopyable {
 struct MsgReqMonitor : NonCopyable {
     struct NewSub {
         Subscription sub;
-    };
-
-    struct AddAuth {
-        uint64_t connId;
-        Bytes32 pubkey;
     };
 
     struct RemoveSub {
@@ -199,7 +188,7 @@ struct MsgReqMonitor : NonCopyable {
     struct DBChange {
     };
 
-    using Var = std::variant<NewSub, AddAuth, RemoveSub, CloseConn, DBChange>;
+    using Var = std::variant<NewSub, RemoveSub, CloseConn, DBChange>;
     Var msg;
     MsgReqMonitor(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -207,7 +196,6 @@ struct MsgReqMonitor : NonCopyable {
 struct MsgNegentropy : NonCopyable {
     struct NegOpen {
         Subscription sub;
-        std::string filterStr;
         std::string negPayload;
     };
 
@@ -215,11 +203,6 @@ struct MsgNegentropy : NonCopyable {
         uint64_t connId;
         SubId subId;
         std::string negPayload;
-    };
-
-    struct AddAuth {
-        uint64_t connId;
-        Bytes32 pubkey;
     };
 
     struct NegClose {
@@ -231,7 +214,7 @@ struct MsgNegentropy : NonCopyable {
         uint64_t connId;
     };
 
-    using Var = std::variant<NegOpen, AddAuth, NegMsg, NegClose, CloseConn>;
+    using Var = std::variant<NegOpen, NegMsg, NegClose, CloseConn>;
     Var msg;
     MsgNegentropy(Var &&msg_) : msg(std::move(msg_)) {}
 };

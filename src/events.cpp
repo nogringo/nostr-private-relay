@@ -192,6 +192,49 @@ uint64_t getMostRecentLevId(lmdb::txn &txn) {
 }
 
 
+uint64_t getMostRecentUploadId(lmdb::txn &txn) {
+    uint64_t uploadId = 0;
+
+    env.foreach_Upload(txn, [&](auto &upload){
+        uploadId = upload.primaryKeyId;
+        return false;
+    }, true);
+
+    return uploadId;
+}
+
+std::optional<uint64_t> lookupUpload(lmdb::txn &txn, std::string_view uploader, uint64_t levId) {
+    auto upload = env.lookup_Upload__uploaderLevId(txn, UploadView::key(uploader, levId));
+    if (!upload) return std::nullopt;
+    return upload->primaryKeyId;
+}
+
+// Who stored an event that came without an authenticated uploader: its owner, or else its signer
+std::string defaultUploader(const PackedEventView &packed) {
+    auto owner = ownerOf(packed);
+    return std::string(owner.size() ? owner : packed.pubkey());
+}
+
+// A DB written before uploads were recorded: every event was stored by its owner
+void addMissingUploads(lmdb::txn &txn) {
+    uint64_t added = 0;
+
+    env.foreach_Event(txn, [&](auto &ev){
+        PackedEventView packed(ev.buf);
+        auto uploader = defaultUploader(packed);
+
+        if (!lookupUpload(txn, uploader, ev.primaryKeyId)) {
+            env.insert_Upload(txn, UploadView::build(uploader, ev.primaryKeyId, packed.created_at(), packed.kind()));
+            added++;
+        }
+
+        return true;
+    });
+
+    LI << "Recorded who stored each of the " << added << " events";
+}
+
+
 // Return result validity same as getEventJson(), see below
 
 std::string_view decodeEventPayload(lmdb::txn &txn, Decompressor &decomp, std::string_view raw, uint32_t *outDictId, size_t *outCompressedSize) {
@@ -238,9 +281,55 @@ std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t lev
 // Do not use externally: does not handle negentropy trees
 
 bool deleteEventBasic(lmdb::txn &txn, uint64_t levId) {
+    std::vector<uint64_t> uploadIds;
+
+    env.foreachDup_Upload__levId(txn, levId, [&](auto &upload){
+        uploadIds.push_back(upload.primaryKeyId);
+        return true;
+    });
+
+    for (auto uploadId : uploadIds) env.delete_Upload(txn, uploadId);
+
     bool deleted = env.dbi_EventPayload.del(txn, lmdb::to_sv<uint64_t>(levId));
     env.delete_Event(txn, levId);
     return deleted;
+}
+
+// Deleting such an event would let the next upload reuse the most recent upload id, which monitors would never see
+bool holdsMostRecentUpload(lmdb::txn &txn, uint64_t levId, uint64_t mostRecentUploadId) {
+    bool found = false;
+
+    env.foreachDup_Upload__levId(txn, levId, [&](auto &upload){
+        found = upload.primaryKeyId == mostRecentUploadId;
+        return !found;
+    });
+
+    return found;
+}
+
+// Removes one pubkey's copy of an event, and the event along with its last copy
+static bool deleteUpload(lmdb::txn &txn, uint64_t uploadId, const std::function<void(const PackedEventView &, bool)> &updateNegentropy) {
+    auto upload = env.lookup_Upload(txn, uploadId);
+    if (!upload) return false;
+
+    uint64_t levId = UploadView(upload->buf).levId();
+    env.delete_Upload(txn, uploadId);
+
+    bool othersLeft = false;
+
+    env.foreachDup_Upload__levId(txn, levId, [&](auto &){
+        othersLeft = true;
+        return false;
+    });
+
+    if (!othersLeft) {
+        if (auto ev = env.lookup_Event(txn, levId)) {
+            updateNegentropy(PackedEventView(ev->buf), false);
+            deleteEventBasic(txn, levId);
+        }
+    }
+
+    return true;
 }
 
 
@@ -284,31 +373,38 @@ static std::optional<uint64_t> vanishedUntil(lmdb::txn &txn, std::optional<Decom
 }
 
 
-// NIP-59: in private storage a gift wrap belongs to its recipient only, so its signer can't delete it
+// NIP-59: a gift wrap is signed by a throwaway key, which can't delete it
 static bool signerCanDelete(uint64_t kind) {
-    return !cfg().relay__auth__authorOnlyWrites || (kind != 1059 && kind != 21059);
+    return !isGiftWrapKind(kind);
 }
 
 
-// NIP-62: everything the pubkey signed up to `until`, and every gift wrap addressed to it
-void collectOwnedEvents(lmdb::txn &txn, std::string_view pubkey, uint64_t until, std::vector<uint64_t> &levIds) {
-    env.generic_foreachFull(txn, env.dbi_Event__pubkey, makeKey_StringUint64(pubkey, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
+// NIP-62: everything the pubkey stored up to `until`, and nothing other pubkeys stored
+static std::vector<uint64_t> collectVanished(lmdb::txn &txn, std::string_view pubkey, uint64_t until) {
+    std::vector<uint64_t> uploadIds;
+
+    env.generic_foreachFull(txn, env.dbi_Upload__uploader, makeKey_StringUint64(pubkey, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
         ParsedKey_StringUint64 parsedKey(k);
         if (parsedKey.s != pubkey || parsedKey.n > until) return false;
-        uint64_t levId = lmdb::from_sv<uint64_t>(v);
-        if (signerCanDelete(PackedEventView(lookupEventByLevId(txn, levId).buf).kind())) levIds.push_back(levId);
+        uploadIds.push_back(lmdb::from_sv<uint64_t>(v));
         return true;
     });
 
-    std::string wrapTag = std::string("p") + std::string(pubkey);
-    env.generic_foreachFull(txn, env.dbi_Event__tag, makeKey_StringUint64(wrapTag, 0), lmdb::to_sv<uint64_t>(0), [&](auto k, auto v) {
-        ParsedKey_StringUint64 parsedKey(k);
-        if (parsedKey.s != wrapTag) return false;
-        uint64_t levId = lmdb::from_sv<uint64_t>(v);
-        auto kind = PackedEventView(lookupEventByLevId(txn, levId).buf).kind();
-        if (kind == 1059 || kind == 21059) levIds.push_back(levId);
-        return true;
+    return uploadIds;
+}
+
+// Returns how many events left the pubkey's storage
+uint64_t erasePubkey(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::string_view pubkey) {
+    auto uploadIds = collectVanished(txn, pubkey, MAX_U64);
+    uint64_t numDeleted = 0;
+
+    neFilterCache.ctx(txn, [&](const std::function<void(const PackedEventView &, bool)> &updateNegentropy){
+        for (auto uploadId : uploadIds) {
+            if (deleteUpload(txn, uploadId, updateNegentropy)) numDeleted++;
+        }
     });
+
+    return numDeleted;
 }
 
 
@@ -318,6 +414,7 @@ static bool isEventABeforeEventB(const PackedEventView &a, const PackedEventView
 }
 
 
+// NIP-37: each pubkey's copies are kept, replaced and deleted on their own
 void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vector<EventToWrite> &evs, bool logDeletions) {
     std::sort(evs.begin(), evs.end(), [](auto &a, auto &b) {
         auto aC = a.createdAt();
@@ -326,7 +423,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
         return aC < bC;
     });
 
-    std::vector<uint64_t> levIdsToDelete;
+    std::vector<uint64_t> uploadIdsToDelete;
     std::string tmpBuf;
     std::optional<Decompressor> decomp;
 
@@ -335,44 +432,65 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
         return until && createdAt <= *until;
     };
 
+    // A deletion request signed by `signer` that names this id, in the uploader's storage
+    auto deletedBy = [&](std::string_view id, std::string_view signer, std::string_view uploader){
+        bool found = false;
+
+        env.foreachDup_Event__deletion(txn, std::string(id) + std::string(signer), [&](auto &deletion){
+            found = lookupUpload(txn, uploader, deletion.primaryKeyId).has_value();
+            return !found;
+        });
+
+        return found;
+    };
+
     neFilterCache.ctx(txn, [&](const std::function<void(const PackedEventView &, bool)> &updateNegentropy){
         for (size_t i = 0; i < evs.size(); i++) {
             auto &ev = evs[i];
 
+            uploadIdsToDelete.clear();
+
             PackedEventView packed(ev.packedStr);
 
-            if (lookupEventById(txn, packed.id()) || (i != 0 && ev.id() == evs[i-1].id())) {
+            if (ev.uploader.empty()) ev.uploader = defaultUploader(packed);
+            std::string_view uploader = ev.uploader;
+
+            auto existing = lookupEventById(txn, packed.id());
+
+            if (existing && lookupUpload(txn, uploader, existing->primaryKeyId)) {
                 ev.status = EventWriteStatus::Duplicate;
                 continue;
             }
 
             // NIP-62: a deletion request has no effect on a request to vanish
-            if (packed.kind() != 62 && signerCanDelete(packed.kind()) && env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(packed.pubkey()))) {
-                ev.status = EventWriteStatus::Deleted;
-                continue;
-            }
+            if (packed.kind() != 62) {
+                bool deleted = signerCanDelete(packed.kind()) && deletedBy(packed.id(), packed.pubkey(), uploader);
 
-            // NIP-62: what a request to vanish deleted can't be published again
-            if (signerCanDelete(packed.kind()) && isVanished(packed.pubkey(), packed.created_at())) {
-                ev.status = EventWriteStatus::Deleted;
-                continue;
-            }
+                // A pubkey can delete its copy of anyone's event
+                if (!deleted && uploader != packed.pubkey()) deleted = deletedBy(packed.id(), uploader, uploader);
 
-            // NIP-59: a gift wrap is signed by a random key, so its recipient (p-tag) may have
-            // deleted it via NIP-09. Block re-publication if such a deletion is on record.
-            if (packed.kind() == 1059 || packed.kind() == 21059) {
-                bool recipientDeleted = false;
-                packed.foreachTag([&](char tagName, std::string_view tagVal){
-                    if (tagName == 'p' && (env.lookup_Event__deletion(txn, std::string(packed.id()) + std::string(tagVal)) || isVanished(tagVal, packed.created_at()))) {
-                        recipientDeleted = true;
-                        return false;
-                    }
-                    return true;
-                });
-                if (recipientDeleted) {
+                // NIP-59: a gift wrap is signed by a random key, so its recipient (p-tag) may have
+                // deleted it via NIP-09. Block re-publication if such a deletion is on record.
+                if (!deleted && isGiftWrapKind(packed.kind())) {
+                    packed.foreachTag([&](char tagName, std::string_view tagVal){
+                        if (tagName == 'p' && deletedBy(packed.id(), tagVal, uploader)) {
+                            deleted = true;
+                            return false;
+                        }
+                        return true;
+                    });
+                }
+
+                if (deleted) {
                     ev.status = EventWriteStatus::Deleted;
                     continue;
                 }
+            }
+
+            // NIP-62: a request to vanish erased its own storage, which then refuses anything older than it
+            if (isVanished(uploader, packed.created_at())) {
+                ev.status = EventWriteStatus::Deleted;
+                continue;
             }
 
             if (isReplaceableKind(packed.kind()) || isParamReplaceableKind(packed.kind())) {
@@ -388,22 +506,26 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                     auto searchStr = std::string(packed.pubkey()) + *replace;
                     auto searchKey = makeKey_StringUint64(searchStr, packed.kind());
 
-                    // Check if there is a newer event in the DB, or an older event to replace
+                    // Check if this uploader stored a newer version, or an older one to replace
 
                     env.generic_foreachFull(txn, env.dbi_Event__replace, searchKey, lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
                         if (k != searchKey) return false;
 
-                        auto otherEv = lookupEventByLevId(txn, lmdb::from_sv<uint64_t>(v));
-                        auto otherPacked = PackedEventView(otherEv.buf);
+                        uint64_t otherLevId = lmdb::from_sv<uint64_t>(v);
+                        auto otherUpload = lookupUpload(txn, uploader, otherLevId);
+                        if (!otherUpload) return true;
+
+                        auto otherPacked = PackedEventView(lookupEventByLevId(txn, otherLevId).buf);
 
                         if (isEventABeforeEventB(packed, otherPacked)) {
                             ev.status = EventWriteStatus::Replaced;
-                        } else {
-                            if (logDeletions) LI << "Deleting event (d-tag). id=" << to_hex(otherPacked.id());
-                            levIdsToDelete.push_back(otherEv.primaryKeyId);
+                            return false;
                         }
 
-                        return false;
+                        if (logDeletions) LI << "Deleting event (d-tag). id=" << to_hex(otherPacked.id());
+                        uploadIdsToDelete.push_back(*otherUpload);
+
+                        return true;
                     }, true);
 
                     // If param-replaceable event is still accepted (pending write), check if there is a more recent deletion
@@ -414,22 +536,25 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
 
                         env.generic_foreachFull(txn, env.dbi_Event__replaceDeletion, searchKey, lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
                             ParsedKey_StringUint64 parsedKey(k);
-                            if (parsedKey.s != searchStr) return false;
+                            if (parsedKey.s != searchStr || parsedKey.n < packed.created_at()) return false;
 
-                            if (parsedKey.n >= packed.created_at()) {
+                            if (lookupUpload(txn, uploader, lmdb::from_sv<uint64_t>(v))) {
                                 ev.status = EventWriteStatus::Deleted;
+                                return false;
                             }
 
-                            return false;
+                            return true;
                         }, true);
                     }
                 }
             }
 
-            if (packed.kind() == 62 && ev.status == EventWriteStatus::Pending && isVanishRequestForThisRelay(tao::json::from_string(ev.jsonStr))) {
-                collectOwnedEvents(txn, packed.pubkey(), packed.created_at(), levIdsToDelete);
+            if (ev.status != EventWriteStatus::Pending) continue;
 
-                if (logDeletions) LI << "Request to vanish from " << to_hex(packed.pubkey()) << ", deleting " << levIdsToDelete.size() << " events";
+            if (packed.kind() == 62 && isVanishRequestForThisRelay(tao::json::from_string(ev.jsonStr))) {
+                uploadIdsToDelete = collectVanished(txn, packed.pubkey(), packed.created_at());
+
+                if (logDeletions) LI << "Request to vanish from " << to_hex(packed.pubkey()) << ", deleting " << uploadIdsToDelete.size() << " events";
             }
 
             if (packed.kind() == 5) {
@@ -437,27 +562,33 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 packed.foreachTag([&](char tagName, std::string_view tagVal){
                     if (tagName == 'e') {
                         auto otherEv = lookupEventById(txn, tagVal);
-                        if (otherEv) {
-                            auto otherPacked = PackedEventView(otherEv->buf);
-                            bool canDelete = otherPacked.pubkey() == packed.pubkey() && otherPacked.kind() != 62 && signerCanDelete(otherPacked.kind());
+                        if (!otherEv) return true;
 
-                            // NIP-59: gift wraps (kind 1059/21059) are signed by a random one-time-use
-                            // key, so the recipient is never the author. Per NIP-59, relays SHOULD delete
-                            // such events whose p-tag matches the signer of a NIP-09 deletion.
-                            if (!canDelete && (otherPacked.kind() == 1059 || otherPacked.kind() == 21059)) {
-                                otherPacked.foreachTag([&](char otherTagName, std::string_view otherTagVal){
-                                    if (otherTagName == 'p' && otherTagVal == packed.pubkey()) {
-                                        canDelete = true;
-                                        return false;
-                                    }
-                                    return true;
-                                });
-                            }
+                        auto otherUpload = lookupUpload(txn, uploader, otherEv->primaryKeyId);
+                        if (!otherUpload) return true;
 
-                            if (canDelete) {
-                                if (logDeletions) LI << "Deleting event (kind 5, e-tag). id=" << to_hex(tagVal);
-                                levIdsToDelete.push_back(otherEv->primaryKeyId);
-                            }
+                        auto otherPacked = PackedEventView(otherEv->buf);
+                        if (otherPacked.kind() == 62) return true;
+
+                        // A pubkey can delete its copy of anyone's event
+                        bool canDelete = packed.pubkey() == uploader || (otherPacked.pubkey() == packed.pubkey() && signerCanDelete(otherPacked.kind()));
+
+                        // NIP-59: gift wraps (kind 1059/21059) are signed by a random one-time-use
+                        // key, so the recipient is never the author. Per NIP-59, relays SHOULD delete
+                        // such events whose p-tag matches the signer of a NIP-09 deletion.
+                        if (!canDelete && isGiftWrapKind(otherPacked.kind())) {
+                            otherPacked.foreachTag([&](char otherTagName, std::string_view otherTagVal){
+                                if (otherTagName == 'p' && otherTagVal == packed.pubkey()) {
+                                    canDelete = true;
+                                    return false;
+                                }
+                                return true;
+                            });
+                        }
+
+                        if (canDelete) {
+                            if (logDeletions) LI << "Deleting event (kind 5, e-tag). id=" << to_hex(tagVal);
+                            uploadIdsToDelete.push_back(*otherUpload);
                         }
                     } else if (tagName == 'a') {
                         try { // parsing a-tag can fail
@@ -469,15 +600,18 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                                 env.generic_foreachFull(txn, env.dbi_Event__replace, searchKey, lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
                                     if (k != searchKey) return false;
 
-                                    auto otherEv = lookupEventByLevId(txn, lmdb::from_sv<uint64_t>(v));
-                                    auto otherPacked = PackedEventView(otherEv.buf);
+                                    uint64_t otherLevId = lmdb::from_sv<uint64_t>(v);
+                                    auto otherUpload = lookupUpload(txn, uploader, otherLevId);
+                                    if (!otherUpload) return true;
+
+                                    auto otherPacked = PackedEventView(lookupEventByLevId(txn, otherLevId).buf);
 
                                     if (otherPacked.created_at() <= packed.created_at()) {
                                         if (logDeletions) LI << "Deleting replaceable event (kind 5, a-tag). id=" << to_hex(otherPacked.id());
-                                        levIdsToDelete.push_back(otherEv.primaryKeyId);
+                                        uploadIdsToDelete.push_back(*otherUpload);
                                     }
 
-                                    return false;
+                                    return true;
                                 }, true);
                             }
                         } catch(...) {
@@ -488,7 +622,9 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 });
             }
 
-            if (ev.status == EventWriteStatus::Pending) {
+            if (existing) {
+                ev.levId = existing->primaryKeyId;
+            } else {
                 ev.levId = env.insert_Event(txn, ev.packedStr);
 
                 tmpBuf.clear();
@@ -497,22 +633,17 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 env.dbi_EventPayload.put(txn, lmdb::to_sv<uint64_t>(ev.levId), tmpBuf);
 
                 updateNegentropy(PackedEventView(ev.packedStr), true);
-
-                ev.status = EventWriteStatus::Written;
-
-                // Deletions happen after event was written to ensure levIds are not reused
-
-                for (auto levId : levIdsToDelete) {
-                    auto evToDel = env.lookup_Event(txn, levId);
-                    if (!evToDel) continue; // already deleted
-                    updateNegentropy(PackedEventView(evToDel->buf), false);
-                    deleteEventBasic(txn, levId);
-                }
-
-                levIdsToDelete.clear();
             }
 
-            if (levIdsToDelete.size()) throw herr("unprocessed deletion");
+            env.insert_Upload(txn, UploadView::build(uploader, ev.levId, packed.created_at(), packed.kind()));
+
+            ev.status = EventWriteStatus::Written;
+
+            // Deletions happen after the upload was written to ensure ids are not reused
+
+            for (auto uploadId : uploadIdsToDelete) {
+                deleteUpload(txn, uploadId, updateNegentropy);
+            }
         }
     });
 }
