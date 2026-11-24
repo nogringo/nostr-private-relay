@@ -210,9 +210,16 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         }
     }
 
+    auto owner = ReadRestrictor::ownerOf(packed);
+
+    // Nobody could read such a wrap, yet it would still use up the limit of its recipients' REQs
+    if (owner.empty() && ReadRestrictor::authorOnly()) {
+        sendOKResponse(connId, to_hex(packed.id()), false, "invalid: this relay only stores gift wraps with a single p tag");
+        return;
+    }
+
     // Banned pubkeys can still vanish
     if (!isVanishRequest) {
-        auto owner = ReadRestrictor::ownerOf(packed);
         auto refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
 
         if (refusal.size()) {

@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { setTimeout as delay } from "node:timers/promises";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "@nostr/tools";
 import { openWebSocket, WsClient } from "../utils/websocketClient.js";
 import { config, runRelaySuite, writeConfig } from "../utils/relay.js";
@@ -37,6 +38,10 @@ const stored = { [alice.pub]: new Set(), [bob.pub]: new Set() };
 
 function sign(user, { kind = 1, tags = [], content = "", created_at = now() } = {}) {
   return finalizeEvent({ kind, tags, content, created_at }, user.sk);
+}
+
+function writeRelayConfig(options = {}) {
+  writeConfig(config(dbDir, port, true, { privateStorage: true, maxPubkeysPerConnection: 2, ...options }), cfgPath);
 }
 
 let wsUrl;
@@ -413,6 +418,45 @@ async function testRequestToVanish({ aliceConn, bobConn }, deletedWrap) {
   pass("testRequestToVanish");
 }
 
+async function testInboxRefusesWrapsWithoutASingleRecipient({ aliceConn, bobConn }) {
+  const wrapFor = (pubkeys, created_at) =>
+    sign(newUser(), { kind: 1059, tags: pubkeys.map((p) => ["p", p]), content: "sealed", created_at });
+
+  const bobCanSendAWrap = async (expected) => {
+    const deadline = Date.now() + 3_000;
+    let ev, ok;
+    do {
+      await delay(100);
+      ev = wrapFor([alice.pub], now() + 60);
+      ok = await publish(bobConn, ev);
+    } while (ok[2] !== expected && Date.now() < deadline);
+    expect(ok[2] === expected, `bob's gift wrap for alice should be ${expected ? "stored" : "refused"}, got: ${ok[3]}`);
+    return ev;
+  };
+
+  writeRelayConfig({ authorOnlyWrites: false });
+  const received = await bobCanSendAWrap(true);
+
+  for (const pubkeys of [[alice.pub, bob.pub], []]) {
+    const ok = await publish(bobConn, wrapFor(pubkeys, now() + 120));
+    expect(
+      ok[2] === false && ok[3].startsWith("invalid:"),
+      `a gift wrap with ${pubkeys.length} p tags has no owner and must be refused, got: ${ok[3]}`,
+    );
+  }
+
+  const newest = await query(aliceConn, "inbox-newest", { kinds: [1059], "#p": [alice.pub], limit: 1 });
+  expect(
+    sameIds(newest.events, new Set([received.id])),
+    "the recipient must get their newest gift wrap, not lose the slot to a wrap nobody can read",
+  );
+
+  writeRelayConfig();
+  await bobCanSendAWrap(false);
+
+  pass("testInboxRefusesWrapsWithoutASingleRecipient");
+}
+
 async function testRelayInformation() {
   const res = await fetch(wsUrl.replace("ws://", "http://"), {
     headers: { Accept: "application/nostr+json" },
@@ -431,10 +475,7 @@ async function testRelayInformation() {
 async function main() {
   console.log("* private storage (NIP-37) relay integration tests");
 
-  writeConfig(
-    config(dbDir, port, true, { privateStorage: true, maxPubkeysPerConnection: 2 }),
-    cfgPath,
-  );
+  writeRelayConfig();
 
   await runRelaySuite({
     relayConfigPath: cfgPath,
@@ -456,6 +497,7 @@ async function main() {
         await testSignerCantTouchAGiftWrap(conns);
         await testNegentropyOnlySyncsOwnEvents(conns);
         await testRequestToVanish(conns, deletedWrap);
+        await testInboxRefusesWrapsWithoutASingleRecipient(conns);
       } finally {
         await conns.aliceConn.close();
         await conns.bobConn.close();

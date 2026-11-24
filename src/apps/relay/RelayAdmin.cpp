@@ -275,7 +275,7 @@ tao::json::value importLines(secp256k1_context *secpCtx, std::string_view body) 
             auto owner = ReadRestrictor::ownerOf(packed);
             std::string refusal;
 
-            if (owner.empty() && cfg().relay__auth__authorOnlyWrites) refusal = "this relay only stores gift wraps with a single p tag";
+            if (owner.empty() && (cfg().relay__auth__authorOnlyWrites || ReadRestrictor::authorOnly())) refusal = "this relay only stores gift wraps with a single p tag";
             else if (!isVanishRequest) refusal = AccessControl::refusal(txn, owner.size() ? owner : packed.pubkey());
 
             if (refusal.size()) {
