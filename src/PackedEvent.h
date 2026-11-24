@@ -18,6 +18,19 @@
 //   1: length (1)
 //   2: value (variable)
 
+inline void foreachPackedTag(std::string_view b, const std::function<bool(char, std::string_view)> &cb) {
+    while (b.size() >= 2) {
+        char tagName = b[0];
+        size_t tagLen = (uint8_t)b[1];
+
+        if (tagLen > b.size() - 2) break;
+
+        bool ret = cb(tagName, b.substr(2, tagLen));
+        if (!ret) break;
+        b = b.substr(2 + tagLen);
+    }
+}
+
 struct PackedEventView {
     std::string_view buf;
 
@@ -49,19 +62,12 @@ struct PackedEventView {
         return lmdb::from_sv<uint64_t>(buf.substr(80, 8));
     }
 
+    std::string_view tags() const {
+        return buf.substr(88);
+    }
+
     void foreachTag(const std::function<bool(char, std::string_view)> &cb) const {
-        std::string_view b = buf.substr(88);
-
-        while (b.size() >= 2) {
-            char tagName = b[0];
-            size_t tagLen = (uint8_t)b[1];
-            
-            if (tagLen > b.size() - 2) break;
-
-            bool ret = cb(tagName, b.substr(2, tagLen));
-            if (!ret) break;
-            b = b.substr(2 + tagLen);
-        }
+        foreachPackedTag(tags(), cb);
     }
 };
 

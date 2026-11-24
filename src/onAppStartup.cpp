@@ -45,6 +45,34 @@ void onPreStartup(int argc, char **argv) {
     ::exit(1);
 }
 
+lmdb::dbi negentropyDbi;
+
+// Every sync covers one uploader's storage, so the relay never reads the full-DB tree that strfry keeps
+static void dropFullDbTree(lmdb::txn &txn) {
+    std::optional<uint64_t> treeId;
+
+    env.foreach_NegentropyFilter(txn, [&](auto &f){
+        if (f.filter() == "{}") {
+            treeId = f.primaryKeyId;
+            return false;
+        }
+        return true;
+    });
+
+    if (!treeId) return;
+
+    std::string prefix(lmdb::to_sv<uint64_t>(*treeId));
+    auto cursor = lmdb::cursor::open(txn, negentropyDbi);
+    std::string_view k, v;
+
+    for (bool found = cursor.get(k, v, MDB_FIRST); found; found = cursor.get(k, v, MDB_NEXT)) {
+        if (k.starts_with(prefix)) cursor.del();
+    }
+
+    env.delete_NegentropyFilter(txn, *treeId);
+    LI << "Dropped the full-DB negentropy tree";
+}
+
 static void dbCheck(lmdb::txn &txn, const std::string &cmd) {
     auto dbTooOld = [&](uint64_t ver) {
         LE << "Database version too old: " << ver << ". Expected version " << CURR_DB_VERSION;
@@ -62,7 +90,6 @@ static void dbCheck(lmdb::txn &txn, const std::string &cmd) {
 
     if (!s) {
         env.insert_Meta(txn, CURR_DB_VERSION, 1, 1);
-        env.insert_NegentropyFilter(txn, "{}");
         return;
     }
 
@@ -73,7 +100,8 @@ static void dbCheck(lmdb::txn &txn, const std::string &cmd) {
         if (s->dbVersion() != 3) dbTooOld(s->dbVersion());
 
         addMissingUploads(txn);
-        env.update_Meta(txn, *s, { .dbVersion = CURR_DB_VERSION });
+        dropFullDbTree(txn);
+        env.update_Meta(txn, *s, { .dbVersion = CURR_DB_VERSION, .negentropyModificationCounter = s->negentropyModificationCounter() + 1 });
         LI << "Upgraded the DB to version " << CURR_DB_VERSION;
         return;
     }
@@ -110,12 +138,10 @@ static void setRLimits() {
 }
 
 
-lmdb::dbi negentropyDbi;
-
 void onAppStartup(lmdb::txn &txn, const std::string &cmd) {
+    negentropyDbi = negentropy::storage::BTreeLMDB::setupDB(txn, "negentropy");
+
     dbCheck(txn, cmd);
 
     setRLimits();
-
-    negentropyDbi = negentropy::storage::BTreeLMDB::setupDB(txn, "negentropy");
 }

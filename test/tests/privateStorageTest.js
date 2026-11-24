@@ -3,7 +3,7 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "@nostr/tools";
 import { openWebSocket, WsClient } from "../utils/websocketClient.js";
-import { config, runRelaySuite, writeConfig } from "../utils/relay.js";
+import { config, runRelaySuite, runStrfry, writeConfig } from "../utils/relay.js";
 
 const require = createRequire(import.meta.url);
 const { Negentropy, NegentropyStorageVector } = require("../../external/negentropy/js/Negentropy.js");
@@ -209,6 +209,15 @@ async function testReadsOnlyReturnOwnUploads({ aliceConn, bobConn }) {
     "a filter on several authors must only match what alice stored",
   );
 
+  const byTag = await query(aliceConn, "by-tag", { "#k": ["1"] });
+  expect(
+    sameIds(byTag.events, new Set(signedBy(alice, alice).filter((ev) => ev.kind === 31234).map((ev) => ev.id))),
+    "a tag filter must only match what alice stored, not bob's draft with the same tag",
+  );
+
+  const tagPrefix = await query(aliceConn, "tag-prefix", { "#d": ["draft"] });
+  expect(tagPrefix.events.length === 0, "a tag filter must match whole values, not prefixes");
+
   const forBob = await query(bobConn, "bob-all", {});
   expect(sameIds(forBob.events, idsOf(bob)), "bob must not get what alice stored, even the events he signed");
 
@@ -245,25 +254,28 @@ async function testOnePubkeyPerConnection({ bobConn }) {
 }
 
 async function testLiveEventsStayPrivate({ aliceConn, bobConn }) {
+  const subIds = ["live", "live-all"];
   aliceConn.send(["REQ", "live", { kinds: [1] }]);
-  await aliceConn.waitFor((m) => m[0] === "EOSE" && m[1] === "live");
+  aliceConn.send(["REQ", "live-all", {}]);
+  for (const subId of subIds) await aliceConn.waitFor((m) => m[0] === "EOSE" && m[1] === subId);
 
   const bobLive = await store(bobConn, sign(bob, { content: "bob live" }));
   keep(bob, bobLive);
   const aliceLive = await store(aliceConn, sign(alice, { content: "alice live" }));
   keep(alice, aliceLive);
 
-  const msgs = await aliceConn.collectUntil(
-    (m) => m[0] === "EVENT" && m[1] === "live" && m[2].id === aliceLive.id,
-  );
+  const received = (msgs, subId, ev) => msgs.some((m) => m[0] === "EVENT" && m[1] === subId && m[2].id === ev.id);
+  const msgs = [];
+  while (!subIds.every((subId) => received(msgs, subId, aliceLive))) msgs.push(await aliceConn.nextMessage());
   expect(
     !msgs.some((m) => m[0] === "EVENT" && m[2].pubkey === bob.pub),
-    "a live subscription must not receive what other users store",
+    "a live subscription must not receive what other users store, even one without a filter",
   );
 
   keep(alice, await store(aliceConn, bobLive));
-  await aliceConn.waitFor((m) => m[0] === "EVENT" && m[1] === "live" && m[2].id === bobLive.id);
-  aliceConn.send(["CLOSE", "live"]);
+  msgs.length = 0;
+  while (!subIds.every((subId) => received(msgs, subId, bobLive))) msgs.push(await aliceConn.nextMessage());
+  for (const subId of subIds) aliceConn.send(["CLOSE", subId]);
 
   pass("testLiveEventsStayPrivate");
 }
@@ -283,20 +295,25 @@ async function testGiftWraps({ aliceConn, bobConn }) {
   const signedByBob = sign(bob, { kind: 1059, tags: [["p", alice.pub]], content: "sealed" });
   keep(bob, await store(bobConn, signedByBob));
 
+  // A wrap belongs to whoever stores it, so it needs no single recipient
   const toBoth = sign(newUser(), { kind: 1059, tags: [["p", bob.pub], ["p", alice.pub]], content: "sealed" });
-  for (const conn of [bobConn, aliceConn]) {
-    const ok = await publish(conn, toBoth);
-    expect(ok[2] === false && ok[3].startsWith("invalid:"), `a gift wrap must have a single p tag, got: ${ok[3]}`);
-  }
+  const toNobody = sign(newUser(), { kind: 1059, content: "sealed" });
+  for (const ev of [toBoth, toNobody]) keep(bob, await store(bobConn, ev));
 
   const forAlice = await query(aliceConn, "wraps", { kinds: [1059], "#p": [alice.pub] });
-  expect(sameIds(forAlice.events, new Set([wrap.id])), "the recipient must get the gift wrap she stored, and only it");
+  expect(
+    sameIds(forAlice.events, new Set([wrap.id])),
+    "the recipient must get the gift wrap she stored, and not the one bob stored with her p tag",
+  );
 
   const all = await query(aliceConn, "all-with-wrap", {});
   expect(all.events.some((ev) => ev.id === wrap.id), "REQ {} must include the gift wraps the user stored");
 
   const forBob = await query(bobConn, "wraps", { kinds: [1059] });
-  expect(sameIds(forBob.events, new Set([wrap.id, signedByBob.id])), "the sender must get the copies he stored");
+  expect(
+    sameIds(forBob.events, new Set([wrap.id, signedByBob.id, toBoth.id, toNobody.id])),
+    "the sender must get the copies he stored",
+  );
 
   // NIP-59: the recipient deletes the wrap by its id, even though they didn't sign it
   const deletion = await store(aliceConn, sign(alice, { kind: 5, tags: [["e", wrap.id]] }));
@@ -509,6 +526,16 @@ async function testRequestToVanish({ aliceConn, bobConn }, deletedWrap) {
   pass("testRequestToVanish");
 }
 
+function testNoFullDbTree() {
+  const trees = runStrfry(["--config", cfgPath, "negentropy", "list"]);
+  expect(
+    trees.status === 0 && !trees.stdout.includes("tree"),
+    `a new DB must not keep a negentropy tree, since sessions only cover one storage, got: ${trees.stdout}`,
+  );
+
+  pass("testNoFullDbTree");
+}
+
 async function testRelayInformation() {
   const res = await fetch(wsUrl.replace("ws://", "http://"), {
     headers: { Accept: "application/nostr+json" },
@@ -555,6 +582,8 @@ async function main() {
         await conns.aliceConn.close();
         await conns.bobConn.close();
       }
+
+      testNoFullDbTree();
     },
   });
 

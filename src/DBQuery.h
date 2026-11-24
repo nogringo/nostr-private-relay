@@ -123,33 +123,10 @@ struct DBScan : NonCopyable {
                 );
             }
         } else if (uploader.size()) {
-            // The upload indices hold neither authors nor tags
-            indexOnly = false;
+            // The upload indices start with the uploader, so a scan never walks (or takes longer for) what other pubkeys stored
             uploadIndex = true;
 
-            if (f.kinds && f.kinds->size() < 1'000) {
-                indexDbi = env.dbi_Upload__uploaderKind;
-                desc = "UploaderKind";
-
-                cursors.reserve(f.kinds->size());
-                for (uint64_t i = 0; i < f.kinds->size(); i++) {
-                    std::string search(uploader);
-                    search += lmdb::to_sv<uint64_t>(f.kinds->at(i));
-
-                    cursors.emplace_back(
-                        search + std::string(8, '\xFF'),
-                        MAX_U64,
-                        [search](std::string_view k){
-                            return k.starts_with(search) ? KeyMatchResult::Yes : KeyMatchResult::No;
-                        }
-                    );
-                }
-            } else {
-                indexDbi = env.dbi_Upload__uploader;
-                desc = "Uploader";
-
-                std::string search(uploader);
-
+            auto addCursor = [&](std::string search){
                 cursors.emplace_back(
                     search + std::string(8, '\xFF'),
                     MAX_U64,
@@ -157,6 +134,65 @@ struct DBScan : NonCopyable {
                         return k.starts_with(search) ? KeyMatchResult::Yes : KeyMatchResult::No;
                     }
                 );
+            };
+
+            if (f.tags.size()) {
+                indexDbi = env.dbi_Upload__uploaderTag;
+                desc = "UploaderTag";
+
+                const auto &[tagName, filterSet] = *std::min_element(f.tags.begin(), f.tags.end(), [](const auto &a, const auto &b){
+                    return a.second.size() < b.second.size();
+                });
+
+                cursors.reserve(filterSet.size());
+                for (uint64_t i = 0; i < filterSet.size(); i++) {
+                    std::string search(uploader);
+                    search += tagName;
+                    search += filterSet.at(i);
+
+                    cursors.emplace_back(
+                        search + std::string(8, '\xFF'),
+                        MAX_U64,
+                        [search](std::string_view k){
+                            return k.size() == search.size() + 8 && k.starts_with(search) ? KeyMatchResult::Yes : KeyMatchResult::No;
+                        }
+                    );
+                }
+            } else if (f.authors && f.kinds && f.authors->size() * f.kinds->size() < 1'000) {
+                indexDbi = env.dbi_Upload__uploaderPubkeyKind;
+                desc = "UploaderPubkeyKind";
+
+                cursors.reserve(f.authors->size() * f.kinds->size());
+                for (uint64_t i = 0; i < f.authors->size(); i++) {
+                    for (uint64_t j = 0; j < f.kinds->size(); j++) {
+                        addCursor(std::string(uploader) + f.authors->at(i) + std::string(lmdb::to_sv<uint64_t>(f.kinds->at(j))));
+                    }
+                }
+            } else if (f.authors) {
+                if (f.kinds) indexOnly = false; // because of the size limit in previous test
+
+                indexDbi = env.dbi_Upload__uploaderPubkey;
+                desc = "UploaderPubkey";
+
+                cursors.reserve(f.authors->size());
+                for (uint64_t i = 0; i < f.authors->size(); i++) {
+                    addCursor(std::string(uploader) + f.authors->at(i));
+                }
+            } else if (f.kinds && f.kinds->size() < 1'000) {
+                indexDbi = env.dbi_Upload__uploaderKind;
+                desc = "UploaderKind";
+
+                cursors.reserve(f.kinds->size());
+                for (uint64_t i = 0; i < f.kinds->size(); i++) {
+                    addCursor(std::string(uploader) + std::string(lmdb::to_sv<uint64_t>(f.kinds->at(i))));
+                }
+            } else {
+                if (f.kinds) indexOnly = false;
+
+                indexDbi = env.dbi_Upload__uploader;
+                desc = "Uploader";
+
+                addCursor(std::string(uploader));
             }
         } else if (f.tags.size()) {
             indexDbi = env.dbi_Event__tag;

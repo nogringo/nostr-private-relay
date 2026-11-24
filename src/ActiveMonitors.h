@@ -28,11 +28,21 @@ struct ActiveMonitors : NonCopyable {
     };
 
     using MonitorSet = flat_hash_map<NostrFilter*, MonitorItem>;
-    btree_map<Bytes32, MonitorSet> allIds;
-    btree_map<Bytes32, MonitorSet> allAuthors;
-    btree_map<std::string, MonitorSet> allTags;
-    btree_map<uint64_t, MonitorSet> allKinds;
-    MonitorSet allOthers;
+
+    struct Lookups {
+        btree_map<Bytes32, MonitorSet> allIds;
+        btree_map<Bytes32, MonitorSet> allAuthors;
+        btree_map<std::string, MonitorSet> allTags;
+        btree_map<uint64_t, MonitorSet> allKinds;
+        MonitorSet allOthers;
+
+        bool empty() const {
+            return allIds.empty() && allAuthors.empty() && allTags.empty() && allKinds.empty() && allOthers.empty();
+        }
+    };
+
+    // NIP-37: an upload is only matched against the subscriptions of its uploader
+    flat_hash_map<std::string, Lookups> uploaderLookups;
 
     std::string tagSpecBuf = std::string(256, '\0');
     const std::string &getTagSpec(uint8_t k, std::string_view val) {
@@ -91,14 +101,16 @@ struct ActiveMonitors : NonCopyable {
 
     // For subscriptions scoped to an uploader, seq is the id of this upload of the event
     void process(lmdb::txn &txn, defaultDb::environment::View_Event &ev, uint64_t seq, std::string_view uploader, const std::function<void(RecipientList &&, uint64_t)> &cb) {
+        auto found = uploaderLookups.find(std::string(uploader));
+        if (found == uploaderLookups.end()) return;
+        auto &lookups = found->second;
+
         RecipientList recipients;
 
         auto processMonitorSet = [&](MonitorSet &ms){
             for (auto &[f, item] : ms) {
                 if (item.latestEventId >= seq || item.mon->sub.latestEventId >= seq) continue;
                 item.latestEventId = seq;
-
-                if (uploader.size() && item.mon->sub.uploader != uploader) continue;
 
                 if (f->doesMatch(PackedEventView(ev.buf))) {
                     recipients.emplace_back(item.mon->sub.connId, item.mon->sub.subId);
@@ -118,17 +130,17 @@ struct ActiveMonitors : NonCopyable {
 
         auto packed = PackedEventView(ev.buf);
 
-        lookupMonitors(allIds, Bytes32(packed.id()));
-        lookupMonitors(allAuthors, Bytes32(packed.pubkey()));
+        lookupMonitors(lookups.allIds, Bytes32(packed.id()));
+        lookupMonitors(lookups.allAuthors, Bytes32(packed.pubkey()));
 
         packed.foreachTag([&](char tagName, std::string_view tagVal){
-            lookupMonitors(allTags, getTagSpec(tagName, tagVal));
+            lookupMonitors(lookups.allTags, getTagSpec(tagName, tagVal));
             return true;
         });
 
-        lookupMonitors(allKinds, packed.kind());
+        lookupMonitors(lookups.allKinds, packed.kind());
 
-        processMonitorSet(allOthers);
+        processMonitorSet(lookups.allOthers);
 
         if (recipients.size()) {
             cb(std::move(recipients), ev.primaryKeyId);
@@ -148,71 +160,79 @@ struct ActiveMonitors : NonCopyable {
     }
 
     void installLookups(Monitor *m, uint64_t currEventId) {
+        auto &lookups = uploaderLookups[m->sub.uploader];
+
         for (auto &f : m->sub.filterGroup.filters) {
             if (f.ids) {
                 for (size_t i = 0; i < f.ids->size(); i++) {
-                    auto res = allIds.try_emplace(Bytes32(f.ids->at(i)));
+                    auto res = lookups.allIds.try_emplace(Bytes32(f.ids->at(i)));
                     res.first->second.try_emplace(&f, MonitorItem{m, currEventId});
                 }
             } else if (f.authors) {
                 for (size_t i = 0; i < f.authors->size(); i++) {
-                    auto res = allAuthors.try_emplace(Bytes32(f.authors->at(i)));
+                    auto res = lookups.allAuthors.try_emplace(Bytes32(f.authors->at(i)));
                     res.first->second.try_emplace(&f, MonitorItem{m, currEventId});
                 }
             } else if (f.tags.size()) {
                 for (const auto &[tagName, filterSet] : f.tags) {
                     for (size_t i = 0; i < filterSet.size(); i++) {
                         auto &tagSpec = getTagSpec(tagName, filterSet.at(i));
-                        auto res = allTags.try_emplace(tagSpec);
+                        auto res = lookups.allTags.try_emplace(tagSpec);
                         res.first->second.try_emplace(&f, MonitorItem{m, currEventId});
                     }
                 }
             } else if (f.kinds) {
                 for (size_t i = 0; i < f.kinds->size(); i++) {
-                    auto res = allKinds.try_emplace(f.kinds->at(i));
+                    auto res = lookups.allKinds.try_emplace(f.kinds->at(i));
                     res.first->second.try_emplace(&f, MonitorItem{m, currEventId});
                 }
             } else {
-                allOthers.try_emplace(&f, MonitorItem{m, currEventId});
+                lookups.allOthers.try_emplace(&f, MonitorItem{m, currEventId});
             }
         }
     }
 
     void uninstallLookups(Monitor *m) {
+        auto found = uploaderLookups.find(m->sub.uploader);
+        if (found == uploaderLookups.end()) return;
+        auto &lookups = found->second;
+
         for (auto &f : m->sub.filterGroup.filters) {
             if (f.ids) {
                 for (size_t i = 0; i < f.ids->size(); i++) {
                     Bytes32 id(f.ids->at(i));
-                    auto &monSet = allIds.at(id);
+                    auto &monSet = lookups.allIds.at(id);
                     monSet.erase(&f);
-                    if (monSet.empty()) allIds.erase(id);
+                    if (monSet.empty()) lookups.allIds.erase(id);
                 }
             } else if (f.authors) {
                 for (size_t i = 0; i < f.authors->size(); i++) {
                     Bytes32 author(f.authors->at(i));
-                    auto &monSet = allAuthors.at(author);
+                    auto &monSet = lookups.allAuthors.at(author);
                     monSet.erase(&f);
-                    if (monSet.empty()) allAuthors.erase(author);
+                    if (monSet.empty()) lookups.allAuthors.erase(author);
                 }
             } else if (f.tags.size()) {
                 for (const auto &[tagName, filterSet] : f.tags) {
                     for (size_t i = 0; i < filterSet.size(); i++) {
                         auto &tagSpec = getTagSpec(tagName, filterSet.at(i));
-                        auto &monSet = allTags.at(tagSpec);
+                        auto &monSet = lookups.allTags.at(tagSpec);
                         monSet.erase(&f);
-                        if (monSet.empty()) allTags.erase(tagSpec);
+                        if (monSet.empty()) lookups.allTags.erase(tagSpec);
                     }
                 }
             } else if (f.kinds) {
                 for (size_t i = 0; i < f.kinds->size(); i++) {
                     uint64_t kind = f.kinds->at(i);
-                    auto &monSet = allKinds.at(kind);
+                    auto &monSet = lookups.allKinds.at(kind);
                     monSet.erase(&f);
-                    if (monSet.empty()) allKinds.erase(kind);
+                    if (monSet.empty()) lookups.allKinds.erase(kind);
                 }
             } else {
-                allOthers.erase(&f);
+                lookups.allOthers.erase(&f);
             }
         }
+
+        if (lookups.empty()) uploaderLookups.erase(found);
     }
 };

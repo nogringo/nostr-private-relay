@@ -224,7 +224,7 @@ void addMissingUploads(lmdb::txn &txn) {
         auto uploader = defaultUploader(packed);
 
         if (!lookupUpload(txn, uploader, ev.primaryKeyId)) {
-            env.insert_Upload(txn, UploadView::build(uploader, ev.primaryKeyId, packed.created_at(), packed.kind()));
+            env.insert_Upload(txn, UploadView::build(uploader, ev.primaryKeyId, packed));
             added++;
         }
 
@@ -635,7 +635,7 @@ void writeEvents(lmdb::txn &txn, NegentropyFilterCache &neFilterCache, std::vect
                 updateNegentropy(PackedEventView(ev.packedStr), true);
             }
 
-            env.insert_Upload(txn, UploadView::build(uploader, ev.levId, packed.created_at(), packed.kind()));
+            env.insert_Upload(txn, UploadView::build(uploader, ev.levId, packed));
 
             ev.status = EventWriteStatus::Written;
 

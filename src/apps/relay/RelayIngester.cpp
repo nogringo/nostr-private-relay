@@ -190,12 +190,6 @@ void RelayServer::ingesterProcessEvent(lmdb::txn &txn, RelayServerCtx &rsctx, ui
         }
     }
 
-    // NIP-59: a gift wrap has a single recipient, who can delete it
-    if (ownerOf(packed).empty()) {
-        sendOKResponse(connId, to_hex(packed.id()), false, "invalid: this relay only stores gift wraps with a single p tag");
-        return;
-    }
-
     // Banned pubkeys can still vanish
     if (!isVanishRequest) {
         auto refusal = AccessControl::refusal(txn, uploader);

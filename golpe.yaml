@@ -93,7 +93,7 @@ tables:
         }
 
   ## NIP-37: who stored each event. In private storage an event is only served to the pubkeys
-  ## that uploaded it, whoever signed it. Layout in Uploads.h
+  ## that uploaded it, whoever signed it. Layout in UploadView.h
   Upload:
     opaque: true
 
@@ -106,13 +106,30 @@ tables:
         comparator: StringUint64
       uploaderKind:
         comparator: StringUint64Uint64
+      uploaderPubkey:
+        comparator: StringUint64
+      uploaderPubkeyKind:
+        comparator: StringUint64Uint64
+      uploaderTag:
+        comparator: StringUint64
+        multi: true
 
     indexPrelude: |
         UploadView upload(v.buf);
+        uint64_t indexTime = upload.created_at();
+        std::string uploaderPubkeyStr = std::string(upload.uploader()) + std::string(upload.pubkey());
+
         levId = upload.levId();
         uploaderLevId = upload.uploaderLevIdKey();
-        uploader = makeKey_StringUint64(upload.uploader(), upload.created_at());
-        uploaderKind = makeKey_StringUint64Uint64(upload.uploader(), upload.kind(), upload.created_at());
+        uploader = makeKey_StringUint64(upload.uploader(), indexTime);
+        uploaderKind = makeKey_StringUint64Uint64(upload.uploader(), upload.kind(), indexTime);
+        uploaderPubkey = makeKey_StringUint64(uploaderPubkeyStr, indexTime);
+        uploaderPubkeyKind = makeKey_StringUint64Uint64(uploaderPubkeyStr, upload.kind(), indexTime);
+
+        upload.foreachTag([&](char tagName, std::string_view tagVal){
+            uploaderTag.push_back(makeKey_StringUint64(std::string(upload.uploader()) + tagName + std::string(tagVal), indexTime));
+            return true;
+        });
 
   CompressionDictionary:
     fields:
